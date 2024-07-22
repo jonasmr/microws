@@ -1,0 +1,26 @@
+{
+	"folders":
+	[
+		{
+			"path": "."
+		}
+	],
+	"build_systems":
+    [
+    	{
+    		"name":"microws_demo",
+			"windows":
+			{
+				"shell_cmd": "ng",
+				"file_regex": "(...*?)\\(([0-9]*)\\):",
+				"working_dir": "${project_path}/demo/"
+			}
+		},
+
+	],
+  "settings": {
+    "ClangFormat": {
+      "format_on_save": true
+    }
+  }
+}
