@@ -6,9 +6,9 @@
 		}
 	],
 	"build_systems":
-    [
-    	{
-    		"name":"microws_demo",
+	[
+		{
+			"name":"microws_demo",
 			"windows":
 			{
 				"shell_cmd": "ng",
@@ -18,9 +18,9 @@
 		},
 
 	],
-  "settings": {
-    "ClangFormat": {
-      "format_on_save": true
-    }
-  }
+	"settings": {
+		"ClangFormat": {
+			"format_on_save": true
+		}
+	}
 }
