@@ -1,7 +1,8 @@
 # win32
 
 
-.win32sdk 10.0.17763.0
+.win32sdk 			10.0.19041.0
+.win32toolchain 	17
 
 cflags 				/D TARGET_X86_64
 
@@ -30,5 +31,3 @@ ldflags 				/DEBUG
 ldflags.debug 			/INCREMENTAL /DYNAMICBASE:NO
 ldflags.release 		/INCREMENTAL:NO /DYNAMICBASE
 ldflags.release 		/OPT:REF /OPT:ICF /LTCG:incremental
-
-ldflags.nomicroprofile  /INCREMENTAL:NO /DYNAMICBASE

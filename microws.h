@@ -5,12 +5,8 @@
 #include <stdint.h>
 #include <type_traits>
 
-#ifndef MICROWS_SEND_MEMORY_PER_CONNECTION
-#define MICROWS_SEND_MEMORY_PER_CONNECTION (64llu << 10llu)
-#endif
-
-#ifndef MICROWS_RECV_MEMORY_PER_CONNECTION
-#define MICROWS_RECV_MEMORY_PER_CONNECTION (64llu << 10llu)
+#ifndef MICROWS_BUFFER_SPACE
+#define MICROWS_BUFFER_SPACE (64llu << 10llu) // must be a multiple of the page size, so we can map it twice for use as a ring buffer/
 #endif
 
 #ifndef MICROWS_MESSAGE_MAX_SIZE

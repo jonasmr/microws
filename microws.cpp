@@ -49,11 +49,11 @@ struct MicroWSConnection
 	uint16_t nWebServerPort;
 	uint32_t SendPut;
 	uint32_t SendGet;
-	uint8_t	 SendBuffer[MICROWS_SEND_MEMORY_PER_CONNECTION];
+	uint8_t* SendBuffer;
 
 	uint32_t RecvPut;
 	uint32_t RecvGet;
-	uint8_t	 RecvBuffer[MICROWS_RECV_MEMORY_PER_CONNECTION];
+	uint8_t* RecvBuffer;
 
 	uint32_t Openening;
 	uint32_t Open;
@@ -88,6 +88,42 @@ void MicroWSInit(uint16_t ListenPort)
 	}
 #endif
 }
+
+static uint32_t MicroWSPutSpace(uint32_t Put, uint32_t Get)
+{
+	if(Put < Get)
+	{
+		return Put - Get - 1;
+	}
+	else
+	{
+		return MICROWS_BUFFER_SPACE + Get - Put - 1;
+	}
+}
+static uint32_t MicroWSPutAdvance(uint32_t Put, uint32_t Get, int32_t Bytes)
+{
+	Put += Bytes;
+	if(Put >= MICROWS_BUFFER_SPACE)
+		Put -= MICROWS_BUFFER_SPACE;
+	return Put;
+}
+
+static uint32_t MicroWSGetSpace(uint32_t Get, uint32_t Put)
+{
+	if(Get <= Put)
+		return Put - Get;
+	else
+		return Put + MICROWS_BUFFER_SPACE - Get;
+}
+
+static uint32_t MicroWSGetAdvance(uint32_t Get, uint32_t Put, int32_t bytes)
+{
+	Get += Bytes;
+	if(Get >= MICROWS_BUFFER_SPACE)
+		Get -= MICROWS_BUFFER_SPACE;
+	return Get;
+}
+
 static void MicroWSDrain()
 {
 	uint32_t FailCount = 0;
@@ -99,8 +135,23 @@ static void MicroWSDrain()
 		if(IsOpen || IsOpening)
 		{
 			// read everything possible
-
+			{
+				uint32_t Put	  = C.ReadPut;
+				uint32_t Get	  = C.ReadGet;
+				uint32_t PutSpace = MicroWSPutSpace(Put, Get);
+				int		 Bytes	  = recv(C.Socket, C.RecvBuffer + Put, PutSpace);
+				Put				  = MicroWSPutAdvance(Put, Get, Bytes);
+				C.ReadPut		  = Put;
+			}
 			// write everything possible.
+			{
+				uint32_t Put	  = C.SendPut;
+				uint32_t Get	  = C.SendGet;
+				uint32_t GetSpace = MicroWSGetSpace(Get, Put);
+				int		 Bytes	  = send(C.Socket, C.SendBuffer + Get, GetSpace, 0);
+				Get				  = MicroWSGetAdvance(Get, Put, Bytes);
+				S.SendGet		  = Get;
+			}
 		}
 	}
 }
@@ -239,6 +290,95 @@ static bool MicroWSTryAccept(uint32_t ConnectionId)
 	close(Connection);
 #endif
 }
+#ifdef _WIN32
+static uint8_t* MicroWSAllocRing()
+{
+	// Stolen from https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc2#examples
+	HANDLE		 Section = nullptr;
+	SYSTEM_INFO	 SysInfo;
+	void*		 RingBuffer	  = nullptr;
+	void*		 Placeholder1 = nullptr;
+	void*		 Placeholder2 = nullptr;
+	void*		 View1		  = nullptr;
+	void*		 View2		  = nullptr;
+	const size_t BufferSize	  = MICROWS_BUFFER_SPACE;
+
+	GetSystemInfo(&SysInfo);
+	if((Buffer % sysInfo.dwAllocationGranularity) != 0)
+	{
+		return nullptr;
+	}
+
+	Placeholder1 = (PCHAR)VirtualAlloc2(nullptr, nullptr, 2 * BufferSize, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0);
+
+	if(!Placeholder1)
+	{
+		uprintf("VirtualAlloc2 failed, error %#x\n", GetLastError());
+		goto Exit;
+	}
+	result = VirtualFree(Placeholder1, bufferSize, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+	if(result == FALSE)
+	{
+		printf("VirtualFreeEx failed, error %#x\n", GetLastError());
+		goto Exit;
+	}
+	Placeholder2 = (void*)((ULONG_PTR)Placeholder1 + BufferSize);
+	Section		 = CreateFileMapping(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, BufferSize, nullptr);
+	if(!Section)
+	{
+		printf("CreateFileMapping failed, error %#x\n", GetLastError());
+		goto Exit;
+	}
+
+	View1 = MapViewOfFile3(Section, nullptr, Placeholder1, 0, BufferSize, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0);
+	if(!View1)
+	{
+		printf("MapViewOfFile3 failed, error %#x\n", GetLastError());
+		goto Exit;
+	}
+	Placeholder1 = nullptr;
+	View2		 = MapViewOfFile3(Section, nullptr, Placeholder2, 0, BufferSize, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0);
+	if(!View2)
+	{
+		printf("MapViewOfFile3 failed, error %#x\n", GetLastError());
+		goto Exit;
+	}
+	Placeholder2 = nullptr;
+	RingBuffer	 = View1;
+	View1		 = nullptr;
+	View2		 = nullptr;
+
+Exit:
+
+	if(Section)
+	{
+		CloseHandle(Section);
+	}
+
+	if(Placeholder1)
+	{
+		VirtualFree(Placeholder1, 0, MEM_RELEASE);
+	}
+
+	if(Placeholder2)
+	{
+		VirtualFree(Placeholder2, 0, MEM_RELEASE);
+	}
+
+	if(View1)
+	{
+		UnmapViewOfFileEx(View1, 0);
+	}
+
+	if(View2)
+	{
+		UnmapViewOfFileEx(View2, 0);
+	}
+
+	return RingBuffer;
+}
+#endif
+
 static uint32_t MicroWSFindConnection(MpSocket Socket)
 {
 	uint32_t ConnectionId = MICROWS_INVALID_CONNECTION;
@@ -247,12 +387,18 @@ static uint32_t MicroWSFindConnection(MpSocket Socket)
 		uint32_t id = i + S.LastConnection;
 		if(id != MICROWS_INVALID_CONNECTION)
 		{
-			uint32_t index = id % MICROWS_MAX_CONNECTIONS;
-			if(S.Connections[index].Opening == S.Connections[index].Closed)
+			uint32_t		   index = id % MICROWS_MAX_CONNECTIONS;
+			MicroWSConnection& C	 = S.Connections[index];
+			if(C.Opening == C.Closed)
 			{
-				S.Connections[index].Opening = id;
-				S.Connections[index].Socket = Socket ConnectionId = id;
-				S.LastConnection								  = id + 1;
+				if(!C.SendBuffer)
+					C.SendBuffer = MicroWSAllocRing();
+				if(!C.RecvBuffer)
+					C.RecvBuffer = MicroWSAllocRing();
+
+				C.Opening = id;
+				C.Socket = Socket ConnectionId = id;
+				S.LastConnection			   = id + 1;
 				break;
 			}
 		}
