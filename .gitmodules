@@ -1,3 +1,6 @@
 [submodule "demo/ngen"]
 	path = demo/ngen
 	url = https://github.com/jonasmr/ngen.git
+[submodule "stb"]
+	path = stb
+	url = git@github.com:nothings/stb.git

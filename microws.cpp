@@ -1,52 +1,110 @@
 #include "microws.h"
 
 #define MICROWS_INVALID_CONNECTION ((uint32_t)0xffffffff)
-#define MICROWS_FLAG_FLUSH 0x1
+// #define MICROWS_FLAG_FLUSH 0x1
 
 #define MWS_ASSERT(a)                                                                                                                                                                                  \
 	do                                                                                                                                                                                                 \
 	{                                                                                                                                                                                                  \
 		if(!(a))                                                                                                                                                                                       \
 		{                                                                                                                                                                                              \
-			MP_BREAK();                                                                                                                                                                                \
+			MWS_BREAK();                                                                                                                                                                               \
 		}                                                                                                                                                                                              \
 	} while(0)
 
-#ifdef _WIN32
-#include <basetsd.h>
-typedef UINT_PTR MWSSocket;
-#else
-typedef int MWSSocket;
-#endif
+typedef void* (*MicroWSThreadFunc)(void*);
+
+#include <inttypes.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 #ifdef _WIN32
+#include <basetsd.h>
+#include <windows.h>
+
+#define MWS_BREAK() __debugbreak()
+typedef UINT_PTR MWSSocket;
 #define MWS_INVALID_SOCKET(f) (f == INVALID_SOCKET)
+typedef HANDLE MicroWSThread;
+
 #else
+
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+
+#define MWS_BREAK() __builtin_trap()
 #define MWS_INVALID_SOCKET(f) (f < 0)
+typedef int		  MWSSocket;
+typedef pthread_t MicroWSThread;
+
 #endif
 
-typedef void* (*MicroProfileThreadFunc)(void*);
-
-#ifndef _WIN32
-typedef pthread_t MicroProfileThread;
-#elif defined(_WIN32)
-typedef HANDLE MicroProfileThread;
+#if defined(MICROWS_SYSTEM_STB)
+#include <stb_sprintf.h>
 #else
-#include <thread>
-typedef std::thread* MicroProfileThread;
+#define STB_SPRINTF_IMPLEMENTATION
+#include "stb/stb_sprintf.h"
 #endif
 
-void MicroProfileThreadStart(MicroProfileThread* pThread, MicroProfileThreadFunc Func);
-void MicroProfileThreadJoin(MicroProfileThread* pThread);
-bool MicroWSSendRaw(uint32_t ConnectionId, uint8_t* Data, uint32_t Size, uint32_t Flags = 0);
+#ifndef MICROWS_DEBUG
+#define MICROWS_DEBUG 1
+#endif
+
+#if MICROWS_DEBUG
+#ifdef _WIN32
+void uprintf(const char* fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	char buffer[1024];
+	stbsp_vsnprintf(buffer, sizeof(buffer) - 1, fmt, args);
+	OutputDebugStringA(buffer);
+	printf(buffer);
+	va_end(args);
+}
+#else
+#define uprintf(...) printf(__VA_ARGS__)
+#endif
+#else
+#define uprintf(...)                                                                                                                                                                                   \
+	do                                                                                                                                                                                                 \
+	{                                                                                                                                                                                                  \
+	} while(0)
+#endif
+
+typedef struct
+{
+	uint32_t	  state[5];
+	uint32_t	  count[2];
+	unsigned char buffer[64];
+} MicroWS_SHA1_CTX;
+
+static void		MicroWShreadStart(MicroWSThread* pThread, MicroWSThreadFunc Func);
+static void		MicroWSThreadJoin(MicroWSThread* pThread);
+static uint32_t MicroWSSendRaw(uint32_t ConnectionId, uint8_t* Data, uint32_t Size);
+static bool		MicroWSOpening(uint32_t i);
+static bool		MicroWSOpen(uint32_t i);
+static bool		MicroWSWrite(uint32_t i);
+static bool		MicroWSRead(uint32_t i);
+static bool		MicroWSWebServerStart();
+static void*	MicroWSAllocRing();
+static void		MicroWS_SHA1_Transform(uint32_t[5], const unsigned char[64]);
+static void		MicroWS_SHA1_Init(MicroWS_SHA1_CTX* context);
+static void		MicroWS_SHA1_Update(MicroWS_SHA1_CTX* context, const unsigned char* data, unsigned int len);
+static void		MicroWS_SHA1_Final(unsigned char digest[20], MicroWS_SHA1_CTX* context);
+static void		MicroWSBase64Encode(char* pOut, const uint8_t* pIn, uint32_t nLen);
+static void		MicroWSWebServerStop();
+template <typename T>
+static T MicroWSMin(T a, T b);
+template <typename T>
+static T MicroWSMax(T a, T b);
+template <typename T>
+static T MicroWSClamp(T a, T min_, T max_);
 
 struct MicroWSConnection
 {
-	bool	 IsRunning = false;
-	uint16_t nWebServerPort;
 	uint32_t SendPut;
 	uint32_t SendGet;
 	uint8_t* SendBuffer;
@@ -55,24 +113,26 @@ struct MicroWSConnection
 	uint32_t RecvGet;
 	uint8_t* RecvBuffer;
 
-	uint32_t Openening;
+	uint32_t Opening;
 	uint32_t Open;
 	uint32_t Closed;
+	uint32_t SendBlocked = 0;
 
-	MWSConnection Socket = INVALID_SOCKET;
+	MWSSocket Socket = INVALID_SOCKET;
 };
 struct MicroWSState
 {
-	MpSocket ListenerSocket;
-
-	uint32_t		  LastConnection = 0;
+	MWSSocket		  ListenerSocket;
+	bool			  IsRunning			 = false;
+	uint16_t		  nWebServerPort	 = 1999;
+	uint32_t		  LastConnection	 = 0;
+	uint64_t		  nWebServerDataSent = 0;
 	MicroWSConnection Connections[MICROWS_MAX_CONNECTIONS];
+	uint32_t		  RejectCount = 0;
 };
 static MicroWSState S;
 
-bool MicroWSWebServerStart();
-
-void MicroWSInit(uint16_t ListenPort)
+bool MicroWSInit(uint16_t ListenPort)
 {
 	MWS_ASSERT(!S.IsRunning);
 	S.nWebServerPort = ListenPort;
@@ -80,13 +140,7 @@ void MicroWSInit(uint16_t ListenPort)
 	{
 		S.IsRunning = true;
 	}
-#if MICROPROFILE_WEBSERVER
-	if(MICROPROFILE_FLIP_FLAG_START_WEBSERVER == (MICROPROFILE_FLIP_FLAG_START_WEBSERVER & FlipFlag) && S.nWebServerDataSent == (uint64_t)-1)
-	{
-		MicroProfileWebServerStart();
-		S.nWebServerDataSent = 0;
-	}
-#endif
+	return S.IsRunning;
 }
 
 static uint32_t MicroWSPutSpace(uint32_t Put, uint32_t Get)
@@ -100,8 +154,9 @@ static uint32_t MicroWSPutSpace(uint32_t Put, uint32_t Get)
 		return MICROWS_BUFFER_SPACE + Get - Put - 1;
 	}
 }
-static uint32_t MicroWSPutAdvance(uint32_t Put, uint32_t Get, int32_t Bytes)
+static uint32_t MicroWSPutAdvance(uint32_t Put, uint32_t Get, uint32_t Bytes)
 {
+	MWS_ASSERT(Bytes <= MicroWSPutSpace(Put, Get));
 	Put += Bytes;
 	if(Put >= MICROWS_BUFFER_SPACE)
 		Put -= MICROWS_BUFFER_SPACE;
@@ -116,118 +171,76 @@ static uint32_t MicroWSGetSpace(uint32_t Get, uint32_t Put)
 		return Put + MICROWS_BUFFER_SPACE - Get;
 }
 
-static uint32_t MicroWSGetAdvance(uint32_t Get, uint32_t Put, int32_t bytes)
+static uint32_t MicroWSGetAdvance(uint32_t Get, uint32_t Put, uint32_t Bytes)
 {
+	MWS_ASSERT(Bytes <= MicroWSGetSpace(Put, Get));
 	Get += Bytes;
 	if(Get >= MICROWS_BUFFER_SPACE)
 		Get -= MICROWS_BUFFER_SPACE;
 	return Get;
 }
 
-static void MicroWSDrain()
+static bool MicroWSTryAccept(uint32_t Index)
 {
-	uint32_t FailCount = 0;
-	for(uint32_t i = 0; i < MICROWS_MAX_CONNECTIONS; ++i)
-	{
-		MicroWSConnection& C		 = S.Connections[i];
-		bool			   IsOpen	 = MicroWSOpen(i);
-		bool			   IsOpening = MicroWSOpening(i);
-		if(IsOpen || IsOpening)
-		{
-			// read everything possible
-			{
-				uint32_t Put	  = C.ReadPut;
-				uint32_t Get	  = C.ReadGet;
-				uint32_t PutSpace = MicroWSPutSpace(Put, Get);
-				int		 Bytes	  = recv(C.Socket, C.RecvBuffer + Put, PutSpace);
-				Put				  = MicroWSPutAdvance(Put, Get, Bytes);
-				C.ReadPut		  = Put;
-			}
-			// write everything possible.
-			{
-				uint32_t Put	  = C.SendPut;
-				uint32_t Get	  = C.SendGet;
-				uint32_t GetSpace = MicroWSGetSpace(Get, Put);
-				int		 Bytes	  = send(C.Socket, C.SendBuffer + Get, GetSpace, 0);
-				Get				  = MicroWSGetAdvance(Get, Put, Bytes);
-				S.SendGet		  = Get;
-			}
-		}
-	}
-}
-static uint32_t MicroWSSendRaw(uint32_t ConnectionId, uint8_t* Data, uint32_t Size, uint32_t Flags)
-{
-	uint32_t FailCount = 0;
-	for(uint32_t i = 0; i < MICROWS_MAX_CONNECTIONS; ++i)
-	{
-		MicroWSConnection& C = S.Connections[i];
-		if((C.Open == ConnectionId && C.Closed != ConnectionId) || (ConnectionId == MICROWS_INVALID_CONNECTION && S.MicroWSOpen(i)))
-		{
-			uint32_t Put = C.SendPut;
-			uint32_t Get = C.SendGet;
-			int32_t	 Bytes;
-			if(Put < Get)
-			{
-				Bytes = Put - Get - 1;
-			}
-			else
-			{
-				Bytes = (MICROWS_SEND_MEMORY_PER_CONNECTION - Put) + Get - 1;
-			}
-			if(Bytes < Size)
-			{
-				FailCount++;
-				continue;
-			}
-			if(Put < Get)
-			{
-				memcpy(&C.SendBuffer[Put], Data, Size);
-				C.SendPut = Put + Size;
-			}
-			else
-			{
-				uint32_t Top = (MICROWS_SEND_MEMORY_PER_CONNECTION - Put);
-				if(Top < Size)
-				{
-					uint32_t Bottom = Size - Top;
-					memcpy(&C.SendBuffer[Put], Data, Top);
-					memcpy(&C.SendBuffer[0], Data + Top, Bottom);
-					C.SendPut = Bottom;
-					MWS_ASSERT(C.SendPut < C.SendGet);
-				}
-				else
-				{
-					memcpy(&C.SendBuffer[Put], Data, Size);
-					Put += Size;
-					C.SendPut = Put == MICROWS_SEND_MEMORY_PER_CONNECTION ? 0 : Put;
-				}
-			}
-		}
-	}
-	if(Flags & MICROWS_FLAG_FLUSH)
-		MicroWSDrain(ConnectionId);
-}
+	MicroWSConnection& C		 = S.Connections[Index];
+	bool			   IsOpen	 = MicroWSOpen(Index);
+	bool			   IsOpening = MicroWSOpening(Index);
+	MWS_ASSERT(!IsOpen);
+	MWS_ASSERT(IsOpening);
 
-static bool MicroWSTryAccept(uint32_t ConnectionId)
-{
-	MicroWSConnection& C	  = S.Connections[ConnectionId % MICROWS_MAX_CONNECTIONS];
-	MWSConnection	   Socket = C.Socket;
-	MWS_ASSERT(C.Opening == ConnectionId);
-	char Req[8192];
-	// todo: do this into the ring buffer properly..
-	int nReceived = recv(Connection, Req, sizeof(Req) - 1, 0);
-	if(nReceived > 0)
+	uint32_t Put   = C.RecvPut;
+	uint32_t Get   = C.RecvGet;
+	uint8_t* Data  = C.RecvBuffer + Get;
+	uint32_t Bytes = MicroWSGetSpace(Get, Put);
+	if(Bytes > 0)
 	{
-		Req[nReceived] = '\0';
-		uprintf("req received\n%s", Req);
+		uprintf("trying to accept %d\n", Bytes);
+		// check its null terminated
+		int null	   = -1;
+		int terminated = -1;
+		for(uint32_t i = 0; i < Bytes; ++i)
+		{
+			if(Data[i] == '\0')
+			{
+				null = i;
+				break;
+			}
+		}
+		if(null > 0)
+		{
+			uprintf("nullterminated!!!\n");
+		}
+		else
+		{
+			// search for "\r\n\r\n" terminator
+			for(int i = 0; i < (int)Bytes - 3; ++i)
+			{
+				if(0 == memcmp(Data + i, "\r\n\r\n", 4))
+				{
+					terminated = i;
+					break;
+				}
+			}
+			if(terminated > 0)
+			{
+				Data[terminated] = '\0';
+			}
+		}
+		if(null == -1 && terminated == -1)
+		{
+			uprintf("not null, and not terminated!!\n");
+			return false;
+		}
+		uprintf("trying to accept!!\n");
+		char* Req = (char*)Data;
 #if MICROPROFILE_MINIZ
 		// Expires: Tue, 01 Jan 2199 16:00:00 GMT\r\n
 #define MICROPROFILE_HTML_HEADER "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: deflate\r\n\r\n"
 #else
 #define MICROPROFILE_HTML_HEADER "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n"
 #endif
-		char* pHttp = strstr(Req, "HTTP/");
 
+		char* pHttp			= strstr(Req, "HTTP/");
 		char* pGet			= strstr(Req, "GET /");
 		char* pHost			= strstr(Req, "Host: ");
 		char* pWebSocketKey = strstr(Req, "Sec-WebSocket-Key: ");
@@ -247,10 +260,6 @@ static bool MicroWSTryAccept(uint32_t ConnectionId)
 
 		if(pWebSocketKey)
 		{
-			if(S.nNumWebSockets) // only allow 1
-			{
-				return false;
-			}
 			pWebSocketKey += sizeof("Sec-WebSocket-Key: ") - 1;
 			Terminate(pWebSocketKey);
 
@@ -264,34 +273,171 @@ static bool MicroWSTryAccept(uint32_t ConnectionId)
 			int	 nLen = stbsp_snprintf(EncodeBuffer, sizeof(EncodeBuffer) - 1, "%s%s", pWebSocketKey, pGUID);
 			uprintf("encode buffer is '%s' %d, %d\n", EncodeBuffer, nLen, (int)strlen(EncodeBuffer));
 
-			uint8_t				  sha[20];
-			MicroProfile_SHA1_CTX ctx;
-			MicroProfile_SHA1_Init(&ctx);
-			MicroProfile_SHA1_Update(&ctx, (unsigned char*)EncodeBuffer, nLen);
-			MicroProfile_SHA1_Final((unsigned char*)&sha[0], &ctx);
+			uint8_t			 sha[20];
+			MicroWS_SHA1_CTX ctx;
+			MicroWS_SHA1_Init(&ctx);
+			MicroWS_SHA1_Update(&ctx, (unsigned char*)EncodeBuffer, nLen);
+			MicroWS_SHA1_Final((unsigned char*)&sha[0], &ctx);
 			char HashOut[(2 + sizeof(sha) / 3) * 4];
 			memset(&HashOut[0], 0, sizeof(HashOut));
-			MicroProfileBase64Encode(&HashOut[0], &sha[0], sizeof(sha));
+			MicroWSBase64Encode(&HashOut[0], &sha[0], sizeof(sha));
 
 			char Reply[1024];
 			nLen = stbsp_snprintf(Reply, sizeof(Reply) - 1, "%s%s\r\n\r\n", pHandShake, HashOut);
-			MP_ASSERT(nLen < 1024 && nLen >= 0);
-			MicroWSSendRaw(ConnectionId, Reply, nLen, MICROWS_FLUSH);
+			MWS_ASSERT(nLen < 1024 && nLen >= 0);
+			MicroWSSendRaw(Index, (uint8_t*)&Reply[0], nLen);
+
+			C.Open = C.Opening;
 			return true;
 		}
-		else
+	}
+	return false;
+}
+
+static void MicroWSDrain()
+{
+	uint32_t FailCount = 0;
+	for(uint32_t i = 0; i < MICROWS_MAX_CONNECTIONS; ++i)
+	{
+		MicroWSConnection& C		 = S.Connections[i];
+		bool			   IsOpen	 = MicroWSOpen(i);
+		bool			   IsOpening = MicroWSOpening(i);
+		if(IsOpen || IsOpening)
 		{
-			return false;
+			// read everything possible
+			{
+				uint32_t Put	  = C.RecvPut;
+				uint32_t Get	  = C.RecvGet;
+				uint32_t PutSpace = MicroWSPutSpace(Put, Get);
+				int		 Bytes	  = recv(C.Socket, (char*)C.RecvBuffer + Put, PutSpace, 0);
+				if(Bytes > 0)
+				{
+					Put		  = MicroWSPutAdvance(Put, Get, (uint32_t)Bytes);
+					C.RecvPut = Put;
+				}
+			}
+		}
+		if(IsOpening && !IsOpen)
+		{
+			MicroWSTryAccept(i);
+		}
+		if(IsOpen || IsOpening)
+		{
+			// write everything possible.
+			{
+				uint32_t Put	  = C.SendPut;
+				uint32_t Get	  = C.SendGet;
+				uint32_t GetSpace = MicroWSGetSpace(Get, Put);
+				int		 Bytes	  = send(C.Socket, (char*)C.SendBuffer + Get, GetSpace, 0);
+				if(Bytes > 0)
+				{
+					Get		  = MicroWSGetAdvance(Get, Put, (uint32_t)Bytes);
+					C.SendGet = Get;
+				}
+			}
 		}
 	}
-#ifdef _WIN32
-	closesocket(Connection);
-#else
-	close(Connection);
-#endif
 }
+static uint32_t MicroWSSendRaw(uint32_t ConnectionId, uint8_t* Data, uint32_t Size)
+{
+	uint32_t FailCount = 0;
+	for(uint32_t i = 0; i < MICROWS_MAX_CONNECTIONS; ++i)
+	{
+		MicroWSConnection& C = S.Connections[i];
+		if(((C.Open == ConnectionId || C.Opening == ConnectionId) && C.Closed != ConnectionId) || (ConnectionId == MICROWS_INVALID_CONNECTION && MicroWSOpen(i)))
+		{
+			uint32_t Put   = C.SendPut;
+			uint32_t Get   = C.SendGet;
+			uint32_t Bytes = MicroWSPutSpace(Put, Get);
+			if(Bytes < Size)
+			{
+				FailCount++;
+				continue;
+			}
+			memcpy(C.SendBuffer + Put, Data, Size);
+			C.SendPut = MicroWSPutAdvance(Put, Get, Size);
+		}
+	}
+	return FailCount;
+}
+
+// static bool MicroWSTryAccept(uint32_t ConnectionId)
+// {
+// 	MicroWSConnection& C	  = S.Connections[ConnectionId % MICROWS_MAX_CONNECTIONS];
+// 	MWSSocket		   Socket = C.Socket;
+// 	MWS_ASSERT(C.Opening == ConnectionId);
+// 	char Req[8192];
+// 	// todo: do this into the ring buffer properly..
+// 	int nReceived = recv(Socket, Req, sizeof(Req) - 1, 0);
+// 	if(nReceived > 0)
+// 	{
+// 		Req[nReceived] = '\0';
+// 		uprintf("req received\n%s", Req);
+// #if MICROPROFILE_MINIZ
+// 		// Expires: Tue, 01 Jan 2199 16:00:00 GMT\r\n
+// #define MICROPROFILE_HTML_HEADER "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: deflate\r\n\r\n"
+// #else
+// #define MICROPROFILE_HTML_HEADER "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n"
+// #endif
+// 		char* pHttp = strstr(Req, "HTTP/");
+
+// 		char* pGet			= strstr(Req, "GET /");
+// 		char* pHost			= strstr(Req, "Host: ");
+// 		char* pWebSocketKey = strstr(Req, "Sec-WebSocket-Key: ");
+// 		auto  Terminate		= [](char* pString)
+// 		{
+// 			char* pEnd = pString;
+// 			while(*pEnd != '\0')
+// 			{
+// 				if(*pEnd == '\r' || *pEnd == '\n' || *pEnd == ' ')
+// 				{
+// 					*pEnd = '\0';
+// 					return;
+// 				}
+// 				pEnd++;
+// 			}
+// 		};
+
+// 		if(pWebSocketKey)
+// 		{
+// 			pWebSocketKey += sizeof("Sec-WebSocket-Key: ") - 1;
+// 			Terminate(pWebSocketKey);
+
+// 			const char* pGUID	   = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+// 			const char* pHandShake = "HTTP/1.1 101 Switching Protocols\r\n"
+// 									 "Upgrade: websocket\r\n"
+// 									 "Connection: Upgrade\r\n"
+// 									 "Sec-WebSocket-Accept: ";
+
+// 			char EncodeBuffer[512];
+// 			int	 nLen = stbsp_snprintf(EncodeBuffer, sizeof(EncodeBuffer) - 1, "%s%s", pWebSocketKey, pGUID);
+// 			uprintf("encode buffer is '%s' %d, %d\n", EncodeBuffer, nLen, (int)strlen(EncodeBuffer));
+
+// 			uint8_t			 sha[20];
+// 			MicroWS_SHA1_CTX ctx;
+// 			MicroWS_SHA1_Init(&ctx);
+// 			MicroWS_SHA1_Update(&ctx, (unsigned char*)EncodeBuffer, nLen);
+// 			MicroWS_SHA1_Final((unsigned char*)&sha[0], &ctx);
+// 			char HashOut[(2 + sizeof(sha) / 3) * 4];
+// 			memset(&HashOut[0], 0, sizeof(HashOut));
+// 			MicroWSBase64Encode(&HashOut[0], &sha[0], sizeof(sha));
+
+// 			char Reply[1024];
+// 			nLen = stbsp_snprintf(Reply, sizeof(Reply) - 1, "%s%s\r\n\r\n", pHandShake, HashOut);
+// 			MWS_ASSERT(nLen < 1024 && nLen >= 0);
+// 			MicroWSSendRaw(ConnectionId, (uint8_t*)&Reply[0], nLen, MICROWS_FLAG_FLUSH);
+// 			return true;
+// 		}
+// 	}
+// #ifdef _WIN32
+// 	closesocket(Socket);
+// #else
+// 	close(Socket);
+// #endif
+// 	return false;
+// }
 #ifdef _WIN32
-static uint8_t* MicroWSAllocRing()
+static void* MicroWSAllocRing()
 {
 	// Stolen from https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc2#examples
 	HANDLE		 Section = nullptr;
@@ -304,7 +450,7 @@ static uint8_t* MicroWSAllocRing()
 	const size_t BufferSize	  = MICROWS_BUFFER_SPACE;
 
 	GetSystemInfo(&SysInfo);
-	if((Buffer % sysInfo.dwAllocationGranularity) != 0)
+	if((BufferSize % SysInfo.dwAllocationGranularity) != 0)
 	{
 		return nullptr;
 	}
@@ -316,31 +462,30 @@ static uint8_t* MicroWSAllocRing()
 		uprintf("VirtualAlloc2 failed, error %#x\n", GetLastError());
 		goto Exit;
 	}
-	result = VirtualFree(Placeholder1, bufferSize, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
-	if(result == FALSE)
+	if(FALSE == VirtualFree(Placeholder1, BufferSize, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
 	{
-		printf("VirtualFreeEx failed, error %#x\n", GetLastError());
+		uprintf("VirtualFreeEx failed, error %#x\n", GetLastError());
 		goto Exit;
 	}
 	Placeholder2 = (void*)((ULONG_PTR)Placeholder1 + BufferSize);
 	Section		 = CreateFileMapping(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, BufferSize, nullptr);
 	if(!Section)
 	{
-		printf("CreateFileMapping failed, error %#x\n", GetLastError());
+		uprintf("CreateFileMapping failed, error %#x\n", GetLastError());
 		goto Exit;
 	}
 
 	View1 = MapViewOfFile3(Section, nullptr, Placeholder1, 0, BufferSize, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0);
 	if(!View1)
 	{
-		printf("MapViewOfFile3 failed, error %#x\n", GetLastError());
+		uprintf("MapViewOfFile3 failed, error %#x\n", GetLastError());
 		goto Exit;
 	}
 	Placeholder1 = nullptr;
 	View2		 = MapViewOfFile3(Section, nullptr, Placeholder2, 0, BufferSize, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0);
 	if(!View2)
 	{
-		printf("MapViewOfFile3 failed, error %#x\n", GetLastError());
+		uprintf("MapViewOfFile3 failed, error %#x\n", GetLastError());
 		goto Exit;
 	}
 	Placeholder2 = nullptr;
@@ -379,28 +524,36 @@ Exit:
 }
 #endif
 
-static uint32_t MicroWSFindConnection(MpSocket Socket)
+static uint32_t MicroWSAssignConnection(MWSSocket Socket)
 {
 	uint32_t ConnectionId = MICROWS_INVALID_CONNECTION;
-	for(uint32 i = 0; i < MICROWS_MAX_CONNECTIONS; ++i)
+	uint32_t Last		  = S.LastConnection;
+	if(Last >= MICROWS_ALL_CONNECTIONS || (Last + MICROWS_MAX_CONNECTIONS >= MICROWS_ALL_CONNECTIONS) || (Last + MICROWS_MAX_CONNECTIONS < Last))
+		Last = 0;
+	for(uint32_t i = 0; i < MICROWS_MAX_CONNECTIONS; ++i)
 	{
-		uint32_t id = i + S.LastConnection;
-		if(id != MICROWS_INVALID_CONNECTION)
+		uint32_t		   id	 = i + Last;
+		uint32_t		   index = id % MICROWS_MAX_CONNECTIONS;
+		MicroWSConnection& C	 = S.Connections[index];
+		if(C.Opening == C.Closed)
 		{
-			uint32_t		   index = id % MICROWS_MAX_CONNECTIONS;
-			MicroWSConnection& C	 = S.Connections[index];
-			if(C.Opening == C.Closed)
-			{
-				if(!C.SendBuffer)
-					C.SendBuffer = MicroWSAllocRing();
-				if(!C.RecvBuffer)
-					C.RecvBuffer = MicroWSAllocRing();
+			if(!C.SendBuffer)
+				C.SendBuffer = (uint8_t*)MicroWSAllocRing();
+			if(!C.RecvBuffer)
+				C.RecvBuffer = (uint8_t*)MicroWSAllocRing();
 
-				C.Opening = id;
-				C.Socket = Socket ConnectionId = id;
-				S.LastConnection			   = id + 1;
-				break;
-			}
+			C.Opening		 = id;
+			C.Socket		 = Socket;
+			ConnectionId	 = id;
+			S.LastConnection = id + 1;
+
+			C.SendBlocked = 0;
+			C.SendPut	  = 0;
+			C.SendGet	  = 0;
+			C.RecvPut	  = 0;
+			C.RecvGet	  = 0;
+
+			break;
 		}
 	}
 	return ConnectionId;
@@ -408,41 +561,108 @@ static uint32_t MicroWSFindConnection(MpSocket Socket)
 
 void MicroWSUpdate(uint32_t* ConnectionsOpened, uint32_t* ConnectionsClosed, uint32_t* IncomingMessages)
 {
+	uprintf("frmae\n");
 	uint32_t Opened = 0, Closed = 0, Messages = 0;
 	for(int i = 0; i < MAX_CONNECTIONS_PER_UPDATE; ++i)
 	{
-		MpSocket Connection = accept(S.ListenerSocket, 0, 0);
-		if(MP_INVALID_SOCKET(Connection))
+		MWSSocket Socket = accept(S.ListenerSocket, 0, 0);
+		if(MWS_INVALID_SOCKET(Socket))
 		{
 			break;
 		}
-		uint32_t ConnectionId = MicroWSOpenConnection(Socket);
-		if(ConnectionId != MICROWS_INVALID_CONNECTION)
+		if(MicroWSAssignConnection(Socket) == MICROWS_INVALID_CONNECTION)
 		{
-			MicroWSTryAccept(ConnectionId);
+			S.RejectCount++;
+			uprintf("Rejected connection. No Available connection slots\n");
 		}
 	}
-	MicroProfileWebSocketFrame();
+	MicroWSDrain();
 }
-bool MicroWSGetMessage(uint32_t Connection, uint32_t* ConnectionOut, uint64_t* OutBufferSize, uint8_t* OutBuffer)
+uint32_t MicroWSGetMessage(uint32_t Connection, uint8_t* OutBuffer, uint32_t BufferSize, uint32_t* ConnectionOut)
 {
+	MicroWSConnection& C			 = S.Connections[Connection];
+	uint32_t		   start		 = 0;
+	uint32_t		   end			 = MICROWS_MAX_CONNECTIONS;
+	bool			   AnyConnection = Connection != MICROWS_ANY_CONNECTION;
+
+	if(Connection == MICROWS_ALL_CONNECTIONS)
+		return 0;
+	if(!AnyConnection)
+	{
+		start = (Connection % MICROWS_MAX_CONNECTIONS);
+		end	  = start + 1;
+	}
+	for(uint32_t i = start; i < end; ++i)
+	{
+		MicroWSConnection& C = S.Connections[i];
+		if(MicroWSOpen(i) && (AnyConnection || C.Open == Connection))
+		{
+			uint32_t Put   = C.RecvPut;
+			uint32_t Get   = C.RecvGet;
+			uint32_t Bytes = MicroWSGetSpace(Get, Put);
+			if(Bytes)
+			{
+				uint8_t* Data	  = C.RecvBuffer + Get;
+				uint32_t OutBytes = Bytes < BufferSize ? Bytes : BufferSize;
+				memcpy(OutBuffer, Data, OutBytes);
+				C.RecvGet = MicroWSGetAdvance(Get, Put, OutBytes);
+				return OutBytes;
+			}
+		}
+	}
+
+	return 0;
 }
-bool MicroWSSendMessage(uint32_t Connection, uint32_t BufferSize, uint8_t* Data)
+bool MicroWSSendMessage(uint32_t Connection, const void* Ptr, uint32_t Size)
 {
+
+	MicroWSConnection& C			  = S.Connections[Connection];
+	uint32_t		   start		  = 0;
+	uint32_t		   end			  = MICROWS_MAX_CONNECTIONS;
+	bool			   AnyConnection  = Connection == MICROWS_ANY_CONNECTION;
+	bool			   AllConnections = Connection == MICROWS_ALL_CONNECTIONS;
+	if(Connection < MICROWS_ALL_CONNECTIONS)
+	{
+		start = (Connection % MICROWS_MAX_CONNECTIONS);
+		end	  = start + 1;
+	}
+	int Failed = 0;
+	for(uint32_t i = start; i < end; ++i)
+	{
+		MicroWSConnection& C = S.Connections[i];
+		if(MicroWSOpen(i) && (AnyConnection || AllConnections || C.Open == Connection))
+		{
+			uint32_t Put   = C.SendPut;
+			uint32_t Get   = C.SendGet;
+			uint32_t Bytes = MicroWSPutSpace(Put, Get);
+			if(Bytes >= Size)
+			{
+				uint8_t* SendData = C.SendBuffer + Put;
+				memcpy(SendData, Ptr, Size);
+				C.SendPut = MicroWSPutAdvance(Put, Get, Size);
+			}
+			else
+			{
+				Failed++;
+				C.SendBlocked++;
+			}
+		}
+	}
+	return Failed == 0;
 }
 void MicroWSShutdown()
 {
 	if(S.IsRunning)
 	{
-		MicroProfileWebServerStop();
-		S.nWebServerDataSent = (uint64_t)-1; // Will cause the web server and its thread to be restarted next time MicroProfileFlip() is called.
+		MicroWSWebServerStop();
+		S.nWebServerDataSent = (uint64_t)-1; // Will cause the web server and its thread to be restarted next time MicroWSFlip() is called.
 	}
 }
 
-bool MicroWSOpening(i)
+bool MicroWSOpening(uint32_t i)
 {
 	MicroWSConnection& C		 = S.Connections[i];
-	uint32_t		   Openening = C.Openening;
+	uint32_t		   Openening = C.Opening;
 	uint32_t		   Closed	 = C.Closed;
 	return int32_t(Openening - Closed) > 0;
 }
@@ -455,28 +675,30 @@ bool MicroWSOpen(uint32_t i)
 	return int32_t(Open - Closed) > 0;
 }
 
-static void MicroWSWrite(uint32_t i)
+static bool MicroWSWrite(uint32_t i)
 {
+	return true;
 }
 
-static void MicroWSRead(uint32_t i)
+static bool MicroWSRead(uint32_t i)
 {
+	return true;
 }
 
-void MicroProfileWebSocketFrame()
+void MicroWSWebSocketFrame()
 {
 	fd_set Read, Write, Error;
 	FD_ZERO(&Read);
 	FD_ZERO(&Write);
 	FD_ZERO(&Error);
-	MpSocket LastSocket		= 1;
-	uint32_t NumOpenSockets = 0;
+	MWSSocket LastSocket	 = 1;
+	uint32_t  NumOpenSockets = 0;
 	for(uint32_t i = 0; i < MICROWS_MAX_CONNECTIONS; ++i)
 	{
 		if(MicroWSOpening(i) || MicroWSOpen(i))
 		{
 			MicroWSConnection& C = S.Connections[i];
-			LastSocket			 = MicroProfileMax(LastSocket, C.Socket + 1);
+			LastSocket			 = MicroWSMax(LastSocket, C.Socket + 1);
 			FD_SET(C.Socket, &Read);
 			FD_SET(C.Socket, &Write);
 			FD_SET(C.Socket, &Error);
@@ -485,36 +707,36 @@ void MicroProfileWebSocketFrame()
 	}
 	if(NumOpenSockets)
 	{
-		if(-1 == select(LastSocket, &Read, &Write, &Error, &tv))
+		timeval tv;
+		tv.tv_sec  = 0;
+		tv.tv_usec = 0;
+		if(-1 == select((int)LastSocket, &Read, &Write, &Error, &tv))
 		{
-			MP_ASSERT(0);
+			MWS_ASSERT(0);
 		}
 		else
 		{
-			timeval tv;
-			tv.tv_sec  = 0;
-			tv.tv_usec = 0;
 			for(uint32_t i = 0; i < MICROWS_MAX_CONNECTIONS; ++i)
 			{
 				if(MicroWSOpening(i) || MicroWSOpen(i))
 				{
 					MicroWSConnection& C		  = S.Connections[i];
-					MpSocket		   Socket	  = C.Socket[i];
+					MWSSocket		   Socket	  = C.Socket;
 					bool			   Disconnect = false;
-					if(FD_ISSET(s, &Error))
+					if(FD_ISSET(Socket, &Error))
 					{
 						Disconnect = true;
 					}
-					if(!Disconnect && FD_ISSET(s, &Read))
+					if(!Disconnect && FD_ISSET(Socket, &Read))
 					{
-						if(!MicroProfileWSRead(i))
+						if(!MicroWSRead(i))
 						{
 							Disconnect = true;
 						}
 					}
-					if(!Disconnect && FD_ISSET(s, &Write))
+					if(!Disconnect && FD_ISSET(Socket, &Write))
 					{
-						if(!MicroProfileWSWrite(i))
+						if(!MicroWSWrite(i))
 						{
 							Disconnect = true;
 						}
@@ -540,7 +762,7 @@ void MicroProfileWebSocketFrame()
 						close(C.Socket);
 #endif
 						C.Socket = INVALID_SOCKET;
-						C.Closed = C.Openening;
+						C.Closed = C.Opening;
 						C.Open	 = C.Opening;
 					}
 				}
@@ -550,7 +772,7 @@ void MicroProfileWebSocketFrame()
 }
 
 #ifndef MicroWSSetNonBlocking // fcntl doesnt work on a some unix like platforms..
-void MicroWSSetNonBlocking(MpSocket Socket, int NonBlocking)
+void MicroWSSetNonBlocking(MWSSocket Socket, int NonBlocking)
 {
 #ifdef _WIN32
 	u_long nonBlocking = NonBlocking ? 1 : 0;
@@ -572,12 +794,35 @@ void MicroWSSetNonBlocking(MpSocket Socket, int NonBlocking)
 bool MicroWSWebServerStart()
 {
 	S.nWebServerDataSent = 0;
+	S.LastConnection	 = 0;
+	S.RejectCount		 = 0;
+
+	for(MicroWSConnection& C : S.Connections)
+	{
+		C.SendPut	  = 0;
+		C.SendGet	  = 0;
+		C.RecvPut	  = 0;
+		C.RecvGet	  = 0;
+		C.Opening	  = MICROWS_INVALID_CONNECTION;
+		C.Open		  = MICROWS_INVALID_CONNECTION;
+		C.Closed	  = MICROWS_INVALID_CONNECTION;
+		C.Socket	  = INVALID_SOCKET;
+		C.SendBlocked = 0;
+	}
+	MicroWSConnection& C = S.Connections[0];
+	if(!C.SendBuffer)
+	{
+		C.SendBuffer = (uint8_t*)MicroWSAllocRing();
+		if(!C.SendBuffer)
+			return false; // failed to allocate ring.
+	}
+
 #ifdef _WIN32
 	WSADATA wsa;
 	if(WSAStartup(MAKEWORD(2, 2), &wsa))
 	{
-		S.ListenerSocket = (MpSocket)-1;
-		return;
+		S.ListenerSocket = (MWSSocket)-1;
+		return false;
 	}
 #endif
 
@@ -611,27 +856,22 @@ bool MicroWSWebServerStart()
 		}
 	}
 	listen(S.ListenerSocket, 8);
-
-	if(!S.WebSocketThreadRunning)
-	{
-		S.WebSocketThreadRunning = 1;
-		MicroProfileThreadStart(&S.WebSocketSendThread, MicroProfileSocketSenderThread);
-	}
+	return true;
 }
 
 void MicroWSWebServerJoin()
 {
-	if(S.WebSocketThreadRunning)
-	{
-		MicroWSThreadJoin(&S.WebSocketSendThread);
-	}
-	S.WebSocketThreadJoined = 1;
+	// if(S.WebSocketThreadRunning)
+	// {
+	// 	MicroWSThreadJoin(&S.WebSocketSendThread);
+	// }
+	// S.WebSocketThreadJoined = 1;
 }
 
 void MicroWSWebServerStop()
 {
-	MicroWSWebServerJoin();
-	MP_ASSERT(S.WebSocketThreadJoined);
+	// MicroWSWebServerJoin();
+	// MWS_ASSERT(S.WebSocketThreadJoined);
 #ifdef _WIN32
 	closesocket(S.ListenerSocket);
 	WSACleanup();
@@ -641,40 +881,40 @@ void MicroWSWebServerStop()
 }
 
 #ifndef _WIN32
-void MicroProfileThreadStart(MicroProfileThread* pThread, MicroProfileThreadFunc Func)
+void MicroWShreadStart(MicroWSThread* pThread, MicroWSThreadFunc Func)
 {
 	pthread_attr_t Attr;
 	int			   r = pthread_attr_init(&Attr);
-	MP_ASSERT(r == 0);
+	MWS_ASSERT(r == 0);
 	pthread_create(pThread, &Attr, Func, 0);
 }
-void MicroProfileThreadJoin(MicroProfileThread* pThread)
+void MicroWSThreadJoin(MicroWSThread* pThread)
 {
 	int r = pthread_join(*pThread, 0);
-	MP_ASSERT(r == 0);
+	MWS_ASSERT(r == 0);
 }
 #elif defined(_WIN32)
 DWORD __stdcall ThreadTrampoline(void* pFunc)
 {
-	MicroProfileThreadFunc F = (MicroProfileThreadFunc)pFunc;
+	MicroWSThreadFunc F = (MicroWSThreadFunc)pFunc;
 	return (uint32_t)(uintptr_t)F(0);
 }
-void MicroProfileThreadStart(MicroProfileThread* pThread, MicroProfileThreadFunc Func)
+void MicroWShreadStart(MicroWSThread* pThread, MicroWSThreadFunc Func)
 {
 	*pThread = CreateThread(0, 0, ThreadTrampoline, Func, 0, 0);
 }
-void MicroProfileThreadJoin(MicroProfileThread* pThread)
+void MicroWSThreadJoin(MicroWSThread* pThread)
 {
 	WaitForSingleObject(*pThread, INFINITE);
 	CloseHandle(*pThread);
 }
 #else
-void MicroProfileThreadStart(MicroProfileThread* pThread, MicroProfileThreadFunc Func)
+void MicroWShreadStart(MicroWSThread* pThread, MicroWSThreadFunc Func)
 {
 	*pThread = MP_ALLOC_OBJECT(std::thread);
 	new(*pThread) std::thread(Func, nullptr);
 }
-void MicroProfileThreadJoin(MicroProfileThread* pThread)
+void MicroWSThreadJoin(MicroWSThread* pThread)
 {
 	(*pThread)->join();
 	(*pThread)->~thread();
@@ -682,3 +922,270 @@ void MicroProfileThreadJoin(MicroProfileThread* pThread)
 	*pThread = 0;
 }
 #endif
+
+// begin: SHA-1 in C
+// ftp://ftp.funet.fi/pub/crypt/hash/sha/sha1.c
+// SHA-1 in C
+// By Steve Reid <steve@edmweb.com>
+// 100% Public Domain
+
+#define rol(value, bits) (((value) << (bits)) | ((value) >> (32 - (bits))))
+
+#define blk0(i) (block->l[i] = htonl(block->l[i]))
+#define blk(i) (block->l[i & 15] = rol(block->l[(i + 13) & 15] ^ block->l[(i + 8) & 15] ^ block->l[(i + 2) & 15] ^ block->l[i & 15], 1))
+
+#define R0(v, w, x, y, z, i)                                                                                                                                                                           \
+	z += ((w & (x ^ y)) ^ y) + blk0(i) + 0x5A827999 + rol(v, 5);                                                                                                                                       \
+	w = rol(w, 30);
+#define R1(v, w, x, y, z, i)                                                                                                                                                                           \
+	z += ((w & (x ^ y)) ^ y) + blk(i) + 0x5A827999 + rol(v, 5);                                                                                                                                        \
+	w = rol(w, 30);
+#define R2(v, w, x, y, z, i)                                                                                                                                                                           \
+	z += (w ^ x ^ y) + blk(i) + 0x6ED9EBA1 + rol(v, 5);                                                                                                                                                \
+	w = rol(w, 30);
+#define R3(v, w, x, y, z, i)                                                                                                                                                                           \
+	z += (((w | x) & y) | (w & x)) + blk(i) + 0x8F1BBCDC + rol(v, 5);                                                                                                                                  \
+	w = rol(w, 30);
+#define R4(v, w, x, y, z, i)                                                                                                                                                                           \
+	z += (w ^ x ^ y) + blk(i) + 0xCA62C1D6 + rol(v, 5);                                                                                                                                                \
+	w = rol(w, 30);
+
+// Hash a single 512-bit block. This is the core of the algorithm.
+
+static void MicroWS_SHA1_Transform(uint32_t state[5], const unsigned char buffer[64])
+{
+	uint32_t a, b, c, d, e;
+	typedef union
+	{
+		unsigned char c[64];
+		uint32_t	  l[16];
+	} CHAR64LONG16;
+	CHAR64LONG16* block;
+
+	block = (CHAR64LONG16*)buffer;
+	// Copy context->state[] to working vars
+	a = state[0];
+	b = state[1];
+	c = state[2];
+	d = state[3];
+	e = state[4];
+	// 4 rounds of 20 operations each. Loop unrolled.
+	R0(a, b, c, d, e, 0);
+	R0(e, a, b, c, d, 1);
+	R0(d, e, a, b, c, 2);
+	R0(c, d, e, a, b, 3);
+	R0(b, c, d, e, a, 4);
+	R0(a, b, c, d, e, 5);
+	R0(e, a, b, c, d, 6);
+	R0(d, e, a, b, c, 7);
+	R0(c, d, e, a, b, 8);
+	R0(b, c, d, e, a, 9);
+	R0(a, b, c, d, e, 10);
+	R0(e, a, b, c, d, 11);
+	R0(d, e, a, b, c, 12);
+	R0(c, d, e, a, b, 13);
+	R0(b, c, d, e, a, 14);
+	R0(a, b, c, d, e, 15);
+	R1(e, a, b, c, d, 16);
+	R1(d, e, a, b, c, 17);
+	R1(c, d, e, a, b, 18);
+	R1(b, c, d, e, a, 19);
+	R2(a, b, c, d, e, 20);
+	R2(e, a, b, c, d, 21);
+	R2(d, e, a, b, c, 22);
+	R2(c, d, e, a, b, 23);
+	R2(b, c, d, e, a, 24);
+	R2(a, b, c, d, e, 25);
+	R2(e, a, b, c, d, 26);
+	R2(d, e, a, b, c, 27);
+	R2(c, d, e, a, b, 28);
+	R2(b, c, d, e, a, 29);
+	R2(a, b, c, d, e, 30);
+	R2(e, a, b, c, d, 31);
+	R2(d, e, a, b, c, 32);
+	R2(c, d, e, a, b, 33);
+	R2(b, c, d, e, a, 34);
+	R2(a, b, c, d, e, 35);
+	R2(e, a, b, c, d, 36);
+	R2(d, e, a, b, c, 37);
+	R2(c, d, e, a, b, 38);
+	R2(b, c, d, e, a, 39);
+	R3(a, b, c, d, e, 40);
+	R3(e, a, b, c, d, 41);
+	R3(d, e, a, b, c, 42);
+	R3(c, d, e, a, b, 43);
+	R3(b, c, d, e, a, 44);
+	R3(a, b, c, d, e, 45);
+	R3(e, a, b, c, d, 46);
+	R3(d, e, a, b, c, 47);
+	R3(c, d, e, a, b, 48);
+	R3(b, c, d, e, a, 49);
+	R3(a, b, c, d, e, 50);
+	R3(e, a, b, c, d, 51);
+	R3(d, e, a, b, c, 52);
+	R3(c, d, e, a, b, 53);
+	R3(b, c, d, e, a, 54);
+	R3(a, b, c, d, e, 55);
+	R3(e, a, b, c, d, 56);
+	R3(d, e, a, b, c, 57);
+	R3(c, d, e, a, b, 58);
+	R3(b, c, d, e, a, 59);
+	R4(a, b, c, d, e, 60);
+	R4(e, a, b, c, d, 61);
+	R4(d, e, a, b, c, 62);
+	R4(c, d, e, a, b, 63);
+	R4(b, c, d, e, a, 64);
+	R4(a, b, c, d, e, 65);
+	R4(e, a, b, c, d, 66);
+	R4(d, e, a, b, c, 67);
+	R4(c, d, e, a, b, 68);
+	R4(b, c, d, e, a, 69);
+	R4(a, b, c, d, e, 70);
+	R4(e, a, b, c, d, 71);
+	R4(d, e, a, b, c, 72);
+	R4(c, d, e, a, b, 73);
+	R4(b, c, d, e, a, 74);
+	R4(a, b, c, d, e, 75);
+	R4(e, a, b, c, d, 76);
+	R4(d, e, a, b, c, 77);
+	R4(c, d, e, a, b, 78);
+	R4(b, c, d, e, a, 79);
+	// Add the working vars back into context.state[]
+	state[0] += a;
+	state[1] += b;
+	state[2] += c;
+	state[3] += d;
+	state[4] += e;
+	// Wipe variables
+	a = b = c = d = e = 0;
+}
+
+void MicroWS_SHA1_Init(MicroWS_SHA1_CTX* context)
+{
+	// SHA1 initialization constants
+	context->state[0] = 0x67452301;
+	context->state[1] = 0xEFCDAB89;
+	context->state[2] = 0x98BADCFE;
+	context->state[3] = 0x10325476;
+	context->state[4] = 0xC3D2E1F0;
+	context->count[0] = context->count[1] = 0;
+}
+
+// Run your data through this.
+
+void MicroWS_SHA1_Update(MicroWS_SHA1_CTX* context, const unsigned char* data, unsigned int len)
+{
+	unsigned int i, j;
+
+	j = (context->count[0] >> 3) & 63;
+	if((context->count[0] += len << 3) < (len << 3))
+		context->count[1]++;
+	context->count[1] += (len >> 29);
+	i = 64 - j;
+	while(len >= i)
+	{
+		memcpy(&context->buffer[j], data, i);
+		MicroWS_SHA1_Transform(context->state, context->buffer);
+		data += i;
+		len -= i;
+		i = 64;
+		j = 0;
+	}
+
+	memcpy(&context->buffer[j], data, len);
+}
+
+// Add padding and return the message digest.
+
+void MicroWS_SHA1_Final(unsigned char digest[20], MicroWS_SHA1_CTX* context)
+{
+	uint32_t	  i, j;
+	unsigned char finalcount[8];
+
+	for(i = 0; i < 8; i++)
+	{
+		finalcount[i] = (unsigned char)((context->count[(i >= 4 ? 0 : 1)] >> ((3 - (i & 3)) * 8)) & 255); // Endian independent
+	}
+	MicroWS_SHA1_Update(context, (unsigned char*)"\200", 1);
+	while((context->count[0] & 504) != 448)
+	{
+		MicroWS_SHA1_Update(context, (unsigned char*)"\0", 1);
+	}
+	MicroWS_SHA1_Update(context, finalcount, 8); // Should cause a SHA1Transform()
+	for(i = 0; i < 20; i++)
+	{
+		digest[i] = (unsigned char)((context->state[i >> 2] >> ((3 - (i & 3)) * 8)) & 255);
+	}
+	// Wipe variables
+	i = j = 0;
+	memset(context->buffer, 0, 64);
+	memset(context->state, 0, 20);
+	memset(context->count, 0, 8);
+	memset(&finalcount, 0, 8);
+}
+
+#undef rol
+#undef blk0
+#undef blk
+#undef R0
+#undef R1
+#undef R2
+#undef R3
+#undef R4
+
+// end: SHA-1 in C
+
+void MicroWSBase64Encode(char* pOut, const uint8_t* pIn, uint32_t nLen)
+{
+	static const char* CODES = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+	//..straight from wikipedia.
+	int	  b;
+	char* o = pOut;
+	for(uint32_t i = 0; i < nLen; i += 3)
+	{
+		b	 = (pIn[i] & 0xfc) >> 2;
+		*o++ = CODES[b];
+		b	 = (pIn[i] & 0x3) << 4;
+		if(i + 1 < nLen)
+		{
+			b |= (pIn[i + 1] & 0xF0) >> 4;
+			*o++ = CODES[b];
+			b	 = (pIn[i + 1] & 0x0F) << 2;
+			if(i + 2 < nLen)
+			{
+				b |= (pIn[i + 2] & 0xC0) >> 6;
+				*o++ = CODES[b];
+				b	 = pIn[i + 2] & 0x3F;
+				*o++ = CODES[b];
+			}
+			else
+			{
+				*o++ = CODES[b];
+				*o++ = '=';
+			}
+		}
+		else
+		{
+			*o++ = CODES[b];
+			*o++ = '=';
+			*o++ = '=';
+		}
+	}
+}
+
+template <typename T>
+static T MicroWSMin(T a, T b)
+{
+	return a < b ? a : b;
+}
+
+template <typename T>
+static T MicroWSMax(T a, T b)
+{
+	return a > b ? a : b;
+}
+template <typename T>
+static T MicroWSClamp(T a, T min_, T max_)
+{
+	return MicroWSMin(max_, MicroWSMax(min_, a));
+}

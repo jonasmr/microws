@@ -23,7 +23,7 @@ cflags 				/D "_UNICODE" /D "UNICODE" /errorReport:prompt /WX- /Zc:forScope /Gd 
 ldflags 			/manifest:embed /MANIFEST /SUBSYSTEM:CONSOLE /MACHINE:X64 /NXCOMPAT
 ldflags 			wsock32.lib 
 ldflags 			kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib
-ldflags 			ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib Winmm.lib
+ldflags 			ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib Winmm.lib onecore.lib
 
 
 ldflags 				/DEBUG

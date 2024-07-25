@@ -1,0 +1,220 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+<title>MicroWS Demo</title>
+<style>
+/* about css: http://bit.ly/1eMQ42U */
+body {margin: 0px;padding: 0px; font: 12px Courier New;background-color:#343434; color:white;overflow:hidden;}
+</style>
+</head>
+<body style="">
+<canvas id="Canvas" height="100%" style="background-color:#343434;margin:0px;padding:0px;"></canvas>
+<script>
+"use strict"
+
+let PendingDraw = 0;
+let Canvas = document.getElementById('Canvas');
+let Width = 1;
+let Height = 1;
+let DPR = 1;
+let xx = 0;
+let StartTime = new Date();
+
+let WSConnected = 0;
+let WSConnectTime = 0;
+let WSIsOpen = 0;
+let WSSeconds = 0;
+let WSErrorCount = 0;
+let WSFail = 0;
+let WS;
+let WSHost = location.hostname ? location.hostname : "localhost";
+let WSPort = location.port ? location.port : 13338;
+let WSPath;
+
+let WSSend = 0;
+let WSReceive = 0;
+let WSSendBytes = 0;
+let WSReceiveBytes = 0;
+let WSOpenTime = 0;
+let WSMessageCount = 0;
+
+const MaxMessages = 10;
+let Messages = [];
+
+function AddMessage(msg)
+{
+	Messages.unshift(msg);
+	if(Messages.length > MaxMessages)
+	{
+		Messages.pop();
+	}
+}
+
+
+function Draw()
+{
+	PendingDraw = 0;
+	let Context = Canvas.getContext('2d');
+	Context.clearRect(0, 0, Width, Height);
+	Context.fillStyle = 'wheat';
+	Context.fillRect(100, 300, 50, 50);
+	const FontSize = 22;
+	const FontFlash = 'Bold ' + FontSize + 'px Courier New';
+	Context.font = FontFlash;
+	Context.textAlign = 'left';
+	let Time = new Date() - StartTime;
+	let Seconds = Time/1000.0;
+	Context.fillText("time:" + (Seconds).toFixed(2), 0, FontSize);
+	Context.fillText("frames:" + xx , 0, FontSize*2);
+	Context.fillText("fps:"+ (xx/Seconds).toFixed(2), 0, FontSize*3);
+
+
+
+	for(let i = 0; i < MaxMessages && i < Messages.length; ++i)
+	{
+		const off = Height + FontSize * (i - MaxMessages);
+		Context.fillText(Messages[i], 0, off);
+	}
+
+	Context.textAlign = 'right';
+	let Off = 1;
+	Context.fillText("WSConnected: " + WSConnected, Width, (Off++) * FontSize);
+	Context.fillText("WSConnectTime: " + WSConnectTime, Width, (Off++) * FontSize);
+	Context.fillText("WSOpenTime: " + WSOpenTime, Width, (Off++) * FontSize);
+	Context.fillText("WSIsOpen: " + WSIsOpen, Width, (Off++) * FontSize);
+	Context.fillText("WSSeconds: " + WSSeconds, Width, (Off++) * FontSize);
+	Context.fillText("WSErrorCount: " + WSErrorCount, Width, (Off++) * FontSize);
+	Context.fillText("WSFail: " + WSFail, Width, (Off++) * FontSize);
+	Context.fillText("WSSendBytes: " + WSSendBytes, Width, (Off++) * FontSize);
+	Context.fillText("WSReceiveBytes: " + WSReceiveBytes, Width, (Off++) * FontSize);
+
+
+	if(0 == (xx % 120))
+	{
+		if(WSIsOpen)
+		{
+			let msg = "HEST!FISK!";
+			console.log("sending! '" + msg + "'");
+			WS.send(msg);
+		}
+	}
+
+	xx++;
+	RequestDraw();
+}
+
+function RequestDraw()
+{
+	if(!PendingDraw)
+	{
+		PendingDraw = 1;
+		requestAnimationFrame(Draw);
+	}
+}
+
+function ResizeCanvas() 
+{
+	Width = window.innerWidth;
+	Height = window.innerHeight;
+	DPR = window.devicePixelRatio;
+	if(DPR)
+	{
+		Canvas.style.width = Width + 'px'; 
+		Canvas.style.height = Height + 'px';
+		Canvas.width = Width * DPR;
+		Canvas.height = Height * DPR;
+		Canvas.getContext('2d').scale(DPR,DPR);
+	}
+	else
+	{
+		DPR = 1;
+		Canvas.width = Width;
+		Canvas.height = Height;
+	}
+}
+
+function Connect()
+{
+	if(WS && (WS.readyState == 1 || WS.readyState == 0))
+	{
+		WSConnected = WS.readyState == 1;
+		WSFail = 0;
+		WSSeconds = 0;
+	}
+	else
+	{
+		WSConnected = 0;
+		WSSeconds = (new Date() - WSOpenTime);
+		if(!WS || WSSeconds > 2000)
+		{
+			if(WS)
+			{
+				WS.close();
+				WS = null;
+			}
+			WSOpenTime = new Date();
+			WSPath = "ws://" + WSHost + ":" + WSPort + "/"  ;
+			AddMessage('Connecting to ' + WSPath);
+			WS = new WebSocket(WSPath);
+			WS.onopen = WSOpen;
+			WS.onmessage = WSMessage;
+			WS.onerror = WSError;
+			WS.onclose = WSClose;
+			WSFail = 0;
+		}
+		else
+		{
+			WSFail++;
+		}
+	}
+	RequestDraw();
+}
+
+
+function WSOpen(event)
+{
+	console.log("WSOPEN! " + event);
+	AddMessage('Open' + event);
+	WSSend = 0;
+	WSReceive = 0;
+	WSSendBytes = 0;
+	WSReceiveBytes = 0;
+	WSIsOpen = 1;	
+	WSConnectTime = new Date();
+}
+
+function WSClose(event)
+{
+	AddMessage('Close' + event);
+	console.log('WSClose ' + event);
+	WSIsOpen = 0;
+	WSConnectTime = 0;
+}
+
+function WSError(event)
+{
+	AddMessage('Error ' + event);
+	console.log('WSError ' + event);
+	WSErrorCount += 1;
+}
+function WSMessage(event)
+{
+	WSMessageCount += 1;
+	AddMessage('Message' + WSMessageCount);
+	console.log("message ");
+	console.log(event.data);
+}
+
+
+
+
+window.addEventListener('resize', ResizeCanvas, false);
+ResizeCanvas();
+RequestDraw();
+setInterval(Connect, 100);
+
+
+
+</script>
+</body>
+</html>      

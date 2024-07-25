@@ -14,7 +14,7 @@ set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not exist "%VSWHERE%" (
     echo vswhere.exe not found. Make sure Visual Studio is installed.
     exit /b 1
-)
+)   
 :: Find the specified version of Visual Studio installation path
 for /f "tokens=*" %%i in ('"%VSWHERE%" -version %VS_VERSION% -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath') do set InstallPath=%%i
 
