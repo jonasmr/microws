@@ -118,6 +118,9 @@ struct MicroWSConnection
 	uint32_t Closed;
 	uint32_t SendBlocked = 0;
 
+	uint32_t FailRSV;
+	uint32_t Fail88;
+
 	MWSSocket Socket = INVALID_SOCKET;
 };
 struct MicroWSState
@@ -196,43 +199,27 @@ static bool MicroWSTryAccept(uint32_t Index)
 	{
 		uprintf("trying to accept %d\n", Bytes);
 		// check its null terminated
-		int null	   = -1;
-		int terminated = -1;
-		for(uint32_t i = 0; i < Bytes; ++i)
-		{
-			if(Data[i] == '\0')
-			{
-				null = i;
-				break;
-			}
-		}
-		if(null > 0)
-		{
-			uprintf("nullterminated!!!\n");
-		}
-		else
+		int Terminated = -1;
 		{
 			// search for "\r\n\r\n" terminator
 			for(int i = 0; i < (int)Bytes - 3; ++i)
 			{
 				if(0 == memcmp(Data + i, "\r\n\r\n", 4))
 				{
-					terminated = i;
+					Terminated = i + 3;
 					break;
 				}
 			}
-			if(terminated > 0)
-			{
-				Data[terminated] = '\0';
-			}
 		}
-		if(null == -1 && terminated == -1)
+		if(Terminated == -1)
 		{
-			uprintf("not null, and not terminated!!\n");
+			uprintf("not null, and not Terminated!!\n");
 			return false;
 		}
 		uprintf("trying to accept!!\n");
-		char* Req = (char*)Data;
+		const uint8_t Term = Data[Terminated];
+		Data[Terminated]   = '\0';
+		char* Req		   = (char*)Data;
 #if MICROPROFILE_MINIZ
 		// Expires: Tue, 01 Jan 2199 16:00:00 GMT\r\n
 #define MICROPROFILE_HTML_HEADER "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: deflate\r\n\r\n"
@@ -287,8 +274,17 @@ static bool MicroWSTryAccept(uint32_t Index)
 			MWS_ASSERT(nLen < 1024 && nLen >= 0);
 			MicroWSSendRaw(Index, (uint8_t*)&Reply[0], nLen);
 
+			Data[Terminated] = Term;
+
+			C.RecvGet = MicroWSGetAdvance(Get, Put, Terminated + 1);
+
 			C.Open = C.Opening;
 			return true;
+		}
+		else
+		{
+			// No web socket key. we can't handshake, but we will ignore the message.
+			uprintf("ignoring message %s\n", Req);
 		}
 	}
 	return false;
@@ -552,6 +548,8 @@ static uint32_t MicroWSAssignConnection(MWSSocket Socket)
 			C.SendGet	  = 0;
 			C.RecvPut	  = 0;
 			C.RecvGet	  = 0;
+			C.Fail88	  = 0;
+			C.FailRSV	  = 0;
 
 			break;
 		}
@@ -561,7 +559,6 @@ static uint32_t MicroWSAssignConnection(MWSSocket Socket)
 
 void MicroWSUpdate(uint32_t* ConnectionsOpened, uint32_t* ConnectionsClosed, uint32_t* IncomingMessages)
 {
-	uprintf("frmae\n");
 	uint32_t Opened = 0, Closed = 0, Messages = 0;
 	for(int i = 0; i < MAX_CONNECTIONS_PER_UPDATE; ++i)
 	{
@@ -578,12 +575,193 @@ void MicroWSUpdate(uint32_t* ConnectionsOpened, uint32_t* ConnectionsClosed, uin
 	}
 	MicroWSDrain();
 }
+
+#define WEBSOCKET_HEADER_MAX 18
+struct MicroProfileWebSocketHeader0
+{
+	union
+	{
+		struct
+		{
+			uint8_t opcode : 4;
+			uint8_t RSV3 : 1;
+			uint8_t RSV2 : 1;
+			uint8_t RSV1 : 1;
+			uint8_t FIN : 1;
+		};
+		uint8_t v;
+	};
+};
+
+struct MicroProfileWebSocketHeader1
+{
+	union
+	{
+		struct
+		{
+			uint8_t payload : 7;
+			uint8_t MASK : 1;
+		};
+		uint8_t v;
+	};
+};
+
+uint32_t MicroWSTryRead(void* Src, uint32_t Size, uint32_t& OutOffset, uint32_t Connection)
+{
+
+	//  0                   1                   2                   3
+	//  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	// +-+-+-+-+-------+-+-------------+-------------------------------+
+	// |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
+	// |I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
+	// |N|V|V|V|       |S|             |   (if payload len==126/127)   |
+	// | |1|2|3|       |K|             |                               |
+	// +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
+	MicroWSConnection& C = S.Connections[Connection];
+	if(Size < 2)
+		return 0;
+	uint8_t* Data	   = (uint8_t*)Src;
+	uint8_t* DataStart = Data;
+	uint8_t* DataEnd   = Data + Size;
+	// uint8_t	 Mask[4];
+	// int		 r;
+	// uint64_t nSize;
+	// uint64_t nSizeBytes = 0;
+
+	MicroProfileWebSocketHeader0* h0 = (MicroProfileWebSocketHeader0*)(Data++);
+	MicroProfileWebSocketHeader1* h1 = (MicroProfileWebSocketHeader1*)(Data++);
+	if(h0->v == 0x88)
+	{
+		C.Fail88++;
+		return 0; // should we discard it?
+	}
+
+	if(h0->RSV1 != 0 || h0->RSV2 != 0 || h0->RSV3 != 0)
+	{
+		C.FailRSV++;
+		return 0;
+	}
+
+	uint32_t PacketSize = h1->payload;
+	uint32_t NumBytes	= 0;
+	switch(PacketSize)
+	{
+	case 126:
+		NumBytes = 2;
+		break;
+	case 127:
+		NumBytes = 8;
+		break;
+	default:
+		break;
+	}
+	if(NumBytes)
+	{
+		PacketSize			   = 0;
+		uint64_t MessageLength = 0;
+
+		uint8_t* BytesMessage = Data;
+		Data += NumBytes;
+		if(Data > DataEnd)
+			return 0; // incomplete message
+		for(uint32_t i = 0; i < NumBytes; i++)
+		{
+			PacketSize <<= 8;
+			PacketSize += BytesMessage[i];
+		}
+
+		for(uint32_t i = 0; i < NumBytes; i++)
+			MessageLength |= BytesMessage[i] << ((NumBytes - 1 - i) * 8);
+		MWS_ASSERT(MessageLength == PacketSize);
+	}
+	uint8_t* pMask = nullptr;
+	if(h1->MASK)
+	{
+		pMask = Data;
+		Data += 4;
+		if(Data > DataEnd)
+			return 0;
+	}
+	uint8_t* Bytes = Data;
+
+	OutOffset = (uint32_t)(Data - DataStart);
+	Data += PacketSize;
+	if(Data > DataEnd)
+		return 0;
+	if(pMask && (pMask[0] != 0 || pMask[1] != 0 || pMask[2] != 0 || pMask[3] != 0))
+	{
+		for(uint32_t i = 0; i < PacketSize; ++i)
+			Bytes[i] ^= pMask[i & 3];
+		// clear so we can run code repeatedly if caller calls with a buffer too small.
+		pMask[0] = 0;
+		pMask[1] = 0;
+		pMask[2] = 0;
+		pMask[3] = 0;
+	}
+
+	return PacketSize;
+}
+
+uint32_t MicroWSWrite(uint8_t* Dst, const void* Src, uint32_t Size)
+{
+	MicroProfileWebSocketHeader0 h0;
+	MicroProfileWebSocketHeader1 h1;
+	h0.v					 = 0;
+	h1.v					 = 0;
+	h0.opcode				 = 1;
+	h0.FIN					 = 1;
+	uint32_t nExtraSizeBytes = 0;
+	uint8_t	 nExtraSize[8];
+	if(Size > 125)
+	{
+		if(Size > 0xffff)
+		{
+			nExtraSizeBytes = 8;
+			h1.payload		= 127;
+		}
+		else
+		{
+			h1.payload		= 126;
+			nExtraSizeBytes = 2;
+		}
+		uint64_t nCount = Size;
+		for(uint32_t i = 0; i < nExtraSizeBytes; ++i)
+		{
+			nExtraSize[nExtraSizeBytes - i - 1] = nCount & 0xff;
+			nCount >>= 8;
+		}
+
+		uint32_t SizeSum = 0;
+		for(uint32_t i = 0; i < nExtraSizeBytes; i++)
+		{
+			SizeSum <<= 8;
+			SizeSum += nExtraSize[i];
+		}
+		MWS_ASSERT(SizeSum == Size); // verify
+	}
+	else
+	{
+		h1.payload = Size;
+	}
+	char* Out = (char*)Dst;
+
+	*Out++ = *(char*)&h0;
+	*Out++ = *(char*)&h1;
+	if(nExtraSizeBytes)
+	{
+		memcpy(Out, &nExtraSize[0], nExtraSizeBytes);
+		Out += nExtraSizeBytes;
+	}
+	memcpy(Out, Src, Size);
+	return 2 + nExtraSizeBytes + Size;
+}
+
 uint32_t MicroWSGetMessage(uint32_t Connection, uint8_t* OutBuffer, uint32_t BufferSize, uint32_t* ConnectionOut)
 {
-	MicroWSConnection& C			 = S.Connections[Connection];
-	uint32_t		   start		 = 0;
-	uint32_t		   end			 = MICROWS_MAX_CONNECTIONS;
-	bool			   AnyConnection = Connection != MICROWS_ANY_CONNECTION;
+	// MicroWSConnection& C			 = S.Connections[Connection];
+	uint32_t start		   = 0;
+	uint32_t end		   = MICROWS_MAX_CONNECTIONS;
+	bool	 AnyConnection = Connection != MICROWS_ANY_CONNECTION;
 
 	if(Connection == MICROWS_ALL_CONNECTIONS)
 		return 0;
@@ -602,17 +780,31 @@ uint32_t MicroWSGetMessage(uint32_t Connection, uint8_t* OutBuffer, uint32_t Buf
 			uint32_t Bytes = MicroWSGetSpace(Get, Put);
 			if(Bytes)
 			{
-				uint8_t* Data	  = C.RecvBuffer + Get;
-				uint32_t OutBytes = Bytes < BufferSize ? Bytes : BufferSize;
-				memcpy(OutBuffer, Data, OutBytes);
-				C.RecvGet = MicroWSGetAdvance(Get, Put, OutBytes);
-				return OutBytes;
+
+				uint8_t* Data		   = C.RecvBuffer + Get;
+				uint32_t MessageOffset = 0;
+				uint32_t MessageSize   = MicroWSTryRead(Data, Bytes, MessageOffset, i);
+				if(MessageSize)
+				{
+					if(MessageSize > BufferSize)
+					{
+						MWS_BREAK(); // todo: support this.
+					}
+					else
+					{
+						memcpy(OutBuffer, Data + MessageOffset, MessageSize);
+					}
+					uint32_t OutBytes = Bytes < BufferSize ? Bytes : BufferSize;
+
+					C.RecvGet = MicroWSGetAdvance(Get, Put, MessageOffset + MessageSize);
+					return MessageSize;
+				}
 			}
 		}
 	}
-
 	return 0;
 }
+
 bool MicroWSSendMessage(uint32_t Connection, const void* Ptr, uint32_t Size)
 {
 
@@ -635,11 +827,11 @@ bool MicroWSSendMessage(uint32_t Connection, const void* Ptr, uint32_t Size)
 			uint32_t Put   = C.SendPut;
 			uint32_t Get   = C.SendGet;
 			uint32_t Bytes = MicroWSPutSpace(Put, Get);
-			if(Bytes >= Size)
+			if(Bytes >= Size + WEBSOCKET_HEADER_MAX)
 			{
-				uint8_t* SendData = C.SendBuffer + Put;
-				memcpy(SendData, Ptr, Size);
-				C.SendPut = MicroWSPutAdvance(Put, Get, Size);
+				uint8_t* SendData	= C.SendBuffer + Put;
+				uint32_t WriteBytes = MicroWSWrite(SendData, Ptr, Size);
+				C.SendPut			= MicroWSPutAdvance(Put, Get, WriteBytes);
 			}
 			else
 			{

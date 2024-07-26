@@ -199,9 +199,9 @@ function WSError(event)
 }
 function WSMessage(event)
 {
-	WSMessageCount += 1;
-	AddMessage('Message' + WSMessageCount);
 	console.log("message ");
+	WSMessageCount += 1;
+	AddMessage('Message' + WSMessageCount + ": '" + event.data + "'");
 	console.log(event.data);
 }
 
