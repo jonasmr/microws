@@ -24,7 +24,7 @@ if "%InstallPath%"=="" (
 )
 
 :: Set up the environment
-"%InstallPath%\Common7\Tools\VsDevCmd.bat"
+python extract_env2.py "%InstallPath%\Common7\Tools\VsDevCmd.bat" win32-setup-fast.bat
 
 :: Indicate the environment is set up
-echo Visual Studio %VS_VERSION% build environment is set up.
+rem echo Visual Studio %VS_VERSION% build environment is set up.

@@ -9,7 +9,6 @@ int main()
 	int delay = 0;
 	while(true)
 	{
-
 		uint32_t Opened, Closed, Messages;
 		MicroWSUpdate(&Opened, &Closed, &Messages);
 
