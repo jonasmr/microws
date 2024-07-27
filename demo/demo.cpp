@@ -6,17 +6,30 @@
 int main()
 {
 	MicroWSInit(13338);
-	int		 delay			   = 0;
-	uint32_t ConnectionVersion = (uint32_t)-1;
+	int					   Delay   = 0;
+	uint32_t			   Version = (uint32_t)-1;
+	MicroWSConnectionState State;
 	while(true)
 	{
 		uint32_t MaxData;
-		MicroWSUpdate(&ConnectionVersion, &MaxData);
+		uint32_t NewVersion;
+		MicroWSUpdate(&NewVersion, &MaxData);
+		if(NewVersion != Version)
+		{
+			MicroWSGetState(State);
+			printf("Active Connections %d\n", State.NumConnections);
+		}
 
 		const char* msg = "hello";
-		if(0 == (delay++ % 30))
+		if(0 == (Delay++ % 30))
 		{
 			printf("sent message!\n");
+			for(uint32_t i = 0; i < State.NumConnections; ++i)
+			{
+				char buffer[128];
+				int	 len = snprintf(buffer, sizeof(buffer) - 1, "direct %d", State.Connections[i]);
+				MicroWSSendMessage(State.Connections[i], buffer, len);
+			}
 			MicroWSSendMessage(MICROWS_ALL_CONNECTIONS, msg, (uint32_t)strlen("hello"));
 		}
 

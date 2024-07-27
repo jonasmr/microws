@@ -23,7 +23,7 @@
 
 #ifndef MAX_CONNECTIONS_PER_UPDATE
 #define MAX_CONNECTIONS_PER_UPDATE 2
-#endif
+#endif // MAX_CONNECTIONS_PER_UPDATE
 
 struct MicroWSConnectionState
 {
