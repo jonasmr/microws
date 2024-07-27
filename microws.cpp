@@ -1,7 +1,9 @@
 #include "microws.h"
 
-#define MICROWS_INVALID_CONNECTION ((uint32_t)0xffffffff)
-// #define MICROWS_FLAG_FLUSH 0x1
+//
+// todo:
+//		handle disconnect.
+//
 
 #define MWS_ASSERT(a)                                                                                                                                                                                  \
 	do                                                                                                                                                                                                 \
@@ -129,6 +131,7 @@ struct MicroWSState
 	bool			  IsRunning			 = false;
 	uint16_t		  nWebServerPort	 = 1999;
 	uint32_t		  LastConnection	 = 0;
+	uint32_t		  ConnectionVersion	 = 0;
 	uint64_t		  nWebServerDataSent = 0;
 	MicroWSConnection Connections[MICROWS_MAX_CONNECTIONS];
 	uint32_t		  RejectCount = 0;
@@ -277,8 +280,8 @@ static bool MicroWSTryAccept(uint32_t Index)
 			Data[Terminated] = Term;
 
 			C.RecvGet = MicroWSGetAdvance(Get, Put, Terminated + 1);
-
-			C.Open = C.Opening;
+			C.Open	  = C.Opening;
+			S.ConnectionVersion++;
 			return true;
 		}
 		else
@@ -290,9 +293,10 @@ static bool MicroWSTryAccept(uint32_t Index)
 	return false;
 }
 
-static void MicroWSDrain()
+static uint32_t MicroWSDrain()
 {
-	uint32_t FailCount = 0;
+	uint32_t FailCount		  = 0;
+	uint32_t MaxDataAvailable = 0;
 	for(uint32_t i = 0; i < MICROWS_MAX_CONNECTIONS; ++i)
 	{
 		MicroWSConnection& C		 = S.Connections[i];
@@ -311,6 +315,8 @@ static void MicroWSDrain()
 					Put		  = MicroWSPutAdvance(Put, Get, (uint32_t)Bytes);
 					C.RecvPut = Put;
 				}
+				uint32_t DataAvailable = MicroWSGetSpace(Get, Put);
+				MaxDataAvailable	   = MaxDataAvailable > DataAvailable ? MaxDataAvailable : DataAvailable;
 			}
 		}
 		if(IsOpening && !IsOpen)
@@ -333,6 +339,7 @@ static void MicroWSDrain()
 			}
 		}
 	}
+	return MaxDataAvailable;
 }
 static uint32_t MicroWSSendRaw(uint32_t ConnectionId, uint8_t* Data, uint32_t Size)
 {
@@ -557,9 +564,28 @@ static uint32_t MicroWSAssignConnection(MWSSocket Socket)
 	return ConnectionId;
 }
 
-void MicroWSUpdate(uint32_t* ConnectionsOpened, uint32_t* ConnectionsClosed, uint32_t* IncomingMessages)
+void MicroWSGetState(MicroWSConnectionState& State)
 {
-	uint32_t Opened = 0, Closed = 0, Messages = 0;
+	uint32_t NumConnections = 0;
+	for(uint32_t i = 0; i < MICROWS_MAX_CONNECTIONS; ++i)
+	{
+		MicroWSConnection& C = S.Connections[i];
+		if(MicroWSOpen(i))
+		{
+			uint32_t Put = C.RecvPut;
+			uint32_t Get = C.RecvGet;
+
+			State.Connections[NumConnections] = C.Open;
+			State.Data[NumConnections]		  = MicroWSGetSpace(Get, Put);
+			NumConnections++;
+		}
+	}
+	State.NumConnections	= NumConnections;
+	State.ConnectionVersion = S.ConnectionVersion;
+}
+
+void MicroWSUpdate(uint32_t* ConnectionsVersion, uint32_t* MaxMessageData)
+{
 	for(int i = 0; i < MAX_CONNECTIONS_PER_UPDATE; ++i)
 	{
 		MWSSocket Socket = accept(S.ListenerSocket, 0, 0);
@@ -573,7 +599,11 @@ void MicroWSUpdate(uint32_t* ConnectionsOpened, uint32_t* ConnectionsClosed, uin
 			uprintf("Rejected connection. No Available connection slots\n");
 		}
 	}
-	MicroWSDrain();
+	uint32_t MaxData = MicroWSDrain();
+	if(MaxMessageData)
+		*MaxMessageData = MaxData;
+	if(ConnectionsVersion)
+		*ConnectionsVersion = S.ConnectionVersion;
 }
 
 #define WEBSOCKET_HEADER_MAX 18

@@ -18,14 +18,23 @@
 #endif // MICROWS_MESSAGE_MAX_SIZE
 
 #ifndef MICROWS_MAX_CONNECTIONS
-#define MICROWS_MAX_CONNECTIONS (8)
+#define MICROWS_MAX_CONNECTIONS (2)
 #endif // MICROWS_MESSAGE_MAX_SIZE
 
 #ifndef MAX_CONNECTIONS_PER_UPDATE
 #define MAX_CONNECTIONS_PER_UPDATE 2
 #endif
+
+struct MicroWSConnectionState
+{
+	uint32_t NumConnections;
+	uint32_t ConnectionVersion;
+	uint32_t Connections[MICROWS_MAX_CONNECTIONS];
+	uint32_t Data[MICROWS_MAX_CONNECTIONS];
+};
 bool	 MicroWSInit(uint16_t ListenPort);
-void	 MicroWSUpdate(uint32_t* ConnectionsOpened, uint32_t* ConnectionsClosed, uint32_t* IncomingMessages);
+void	 MicroWSUpdate(uint32_t* ConnectionsVersion = nullptr, uint32_t* MessageData = nullptr);
+void	 MicroWSGetState(MicroWSConnectionState& State);
 uint32_t MicroWSGetMessage(uint32_t Connection, uint8_t* OutBuffer, uint32_t BufferSize, uint32_t* ConnectionOut = nullptr);
 bool	 MicroWSSendMessage(uint32_t Connection, const void* Data, uint32_t Size);
 void	 MicroWSShutdown();

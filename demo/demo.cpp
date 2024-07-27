@@ -6,11 +6,12 @@
 int main()
 {
 	MicroWSInit(13338);
-	int delay = 0;
+	int		 delay			   = 0;
+	uint32_t ConnectionVersion = (uint32_t)-1;
 	while(true)
 	{
-		uint32_t Opened, Closed, Messages;
-		MicroWSUpdate(&Opened, &Closed, &Messages);
+		uint32_t MaxData;
+		MicroWSUpdate(&ConnectionVersion, &MaxData);
 
 		const char* msg = "hello";
 		if(0 == (delay++ % 30))
