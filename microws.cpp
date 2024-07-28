@@ -137,6 +137,13 @@ struct MicroWSState
 	uint32_t		  RejectCount = 0;
 };
 static MicroWSState S;
+static void			MicroWSAtExitHandler()
+{
+	if(S.IsRunning)
+	{
+		MicroWSWebServerStop();
+	}
+}
 
 bool MicroWSInit(uint16_t ListenPort)
 {
@@ -145,6 +152,7 @@ bool MicroWSInit(uint16_t ListenPort)
 	if(MicroWSWebServerStart())
 	{
 		S.IsRunning = true;
+		atexit(MicroWSAtExitHandler);
 	}
 	return S.IsRunning;
 }
@@ -200,7 +208,7 @@ static bool MicroWSTryAccept(uint32_t Index)
 	uint32_t Bytes = MicroWSGetSpace(Get, Put);
 	if(Bytes > 0)
 	{
-		uprintf("trying to accept %d\n", Bytes);
+		uprintf("trying to accept %d -> %d bytes CONN %d ->SOCK[%d]\n", Index, Bytes, C.Opening, C.Socket);
 		// check its null terminated
 		int Terminated = -1;
 		{
@@ -281,6 +289,9 @@ static bool MicroWSTryAccept(uint32_t Index)
 
 			C.RecvGet = MicroWSGetAdvance(Get, Put, Terminated + 1);
 			C.Open	  = C.Opening;
+
+			uprintf("OPEN! %d CONN %d SOCK[%d]\n", Index, C.Opening, C.Socket);
+
 			S.ConnectionVersion++;
 			return true;
 		}
@@ -288,6 +299,7 @@ static bool MicroWSTryAccept(uint32_t Index)
 		{
 			// No web socket key. we can't handshake, but we will ignore the message.
 			uprintf("ignoring message %s\n", Req);
+			MWS_BREAK();
 		}
 	}
 	return false;
@@ -478,6 +490,29 @@ static const char* WSAGetErrorString(int Error)
 	}
 	return "unknown?";
 }
+
+static void MicroWSCheckErrorSelect(int Error)
+{
+	if(Error == EAGAIN)
+		MWS_BREAK();
+	if(Error == EWOULDBLOCK)
+		MWS_BREAK();
+	if(Error == SOCKET_ERROR)
+	{
+		int err1 = WSAGetLastError();
+		if(err1 == WSAEWOULDBLOCK)
+			return;
+		switch(err1)
+		{
+		case WSAEWOULDBLOCK:
+			return;
+		default:
+			uprintf("last error unknown %d .. %s\n", err1, WSAGetErrorString(err1));
+			MWS_BREAK();
+		}
+	}
+}
+
 static void MicroWSCheckError(uint32_t i, int Error)
 {
 	MicroWSConnection& C = S.Connections[i];
@@ -491,19 +526,24 @@ static void MicroWSCheckError(uint32_t i, int Error)
 		int err1 = WSAGetLastError();
 		if(err1 == WSAEWOULDBLOCK)
 			return;
-		if(err1)
+		switch(err1)
 		{
+		case WSAEWOULDBLOCK:
+			return;
+		case WSAENETRESET:
+		case WSAECONNABORTED:
+		case WSAECONNRESET:
+			uprintf("CLOSE CONNECTION %d :: %d :: SOCK[%d]\n", i, C.Opening, C.Socket);
+			shutdown(C.Socket, 2);
+			closesocket(C.Socket);
+			C.Socket = INVALID_SOCKET;
+			C.Open = C.Closed = C.Opening;
+			S.ConnectionVersion++;
+			break;
 
-			uprintf("last error %d .. %s\n", err1, WSAGetErrorString(err1));
-		}
-		int error_code;
-		int error_code_size = sizeof(error_code);
-		getsockopt(C.Socket, SOL_SOCKET, SO_ERROR, (char*)&error_code, &error_code_size);
-		if(error_code != 0)
-		{
-
-			uprintf("Error code is %d\n", error_code);
-			__debugbreak();
+		default:
+			uprintf("last error unknown %d .. %s SOCK[%d]\n", err1, WSAGetErrorString(err1), C.Socket);
+			MWS_BREAK();
 		}
 	}
 }
@@ -537,10 +577,14 @@ static uint32_t MicroWSDrain()
 				MaxDataAvailable	   = MaxDataAvailable > DataAvailable ? MaxDataAvailable : DataAvailable;
 			}
 		}
+		IsOpen	  = MicroWSOpen(i);
+		IsOpening = MicroWSOpening(i);
 		if(IsOpening && !IsOpen)
 		{
 			MicroWSTryAccept(i);
 		}
+		IsOpen	  = MicroWSOpen(i);
+		IsOpening = MicroWSOpening(i);
 		if(IsOpen || IsOpening)
 		{
 			// write everything possible.
@@ -771,6 +815,7 @@ static uint32_t MicroWSAssignConnection(MWSSocket Socket)
 			C.Socket		 = Socket;
 			ConnectionId	 = id;
 			S.LastConnection = id + 1;
+			S.ConnectionVersion++;
 
 			C.SendBlocked = 0;
 			C.SendPut	  = 0;
@@ -780,6 +825,7 @@ static uint32_t MicroWSAssignConnection(MWSSocket Socket)
 			C.Fail88	  = 0;
 			C.FailRSV	  = 0;
 
+			uprintf("ASSIGN :: %d -> %d SOCK[%d]\n", index, id, C.Socket);
 			break;
 		}
 	}
@@ -1152,7 +1198,12 @@ void MicroWSWebSocketFrame()
 		timeval tv;
 		tv.tv_sec  = 0;
 		tv.tv_usec = 0;
-		if(-1 == select((int)LastSocket, &Read, &Write, &Error, &tv))
+		int r	   = select((int)LastSocket, &Read, &Write, &Error, &tv);
+		if(r < 0)
+		{
+			MicroWSCheckErrorSelect(r);
+		}
+		if(-1 == r)
 		{
 			MWS_ASSERT(0);
 		}
