@@ -41,6 +41,8 @@ let WSReadyState = 9999;
 
 const MaxMessages = 10;
 let Messages = [];
+const MaxGraph = 300;
+let Graph = [];
 
 function AddMessage(msg)
 {
@@ -51,14 +53,45 @@ function AddMessage(msg)
 	}
 }
 
+function DrawGraph(Context, BaseX, BaseY, W, H)
+{
+	let min = 1e40;
+	let max = -1e30;
+	for(let i = 0; i < Graph.length; ++i)
+	{
+		min = Math.min(min, Graph[i]);
+		max = Math.max(max, Graph[i]);
+	}
+	
+	Context.fillStyle = 'black';
+	Context.fillRect(BaseX, BaseY, W, H);
+	Context.fillStyle = 'green';
+	Context.strokeStyle = 'green';
+	let dx = W / (MaxGraph-1);
+	Context.beginPath();
+	let X = BaseX + W;	
+	Context.moveTo(X, BaseY + H);
+	for(let i = 0; i < Graph.length; ++i)
+	{
+		let Prc = (Graph[i] - min) / (max-min);
+		let Y = BaseY + H - Prc * H;
+		Context.lineTo(X, Y);
+		X -= dx;
+	}
+	Context.stroke();
+	Context.lineTo(X, BaseY + H);
+	Context.globalAlpha = 0.5;
+	Context.fill();	
+	Context.globalAlpha = 1;
+}
 
 function Draw()
 {
 	PendingDraw = 0;
 	let Context = Canvas.getContext('2d');
-	Context.clearRect(0, 0, Width, Height);
 	Context.fillStyle = 'wheat';
-	Context.fillRect(100, 300, 50, 50);
+
+	Context.clearRect(0, 0, Width, Height);
 	const FontSize = 22;
 	const FontFlash = 'Bold ' + FontSize + 'px Courier New';
 	Context.font = FontFlash;
@@ -90,6 +123,8 @@ function Draw()
 	Context.fillText("WSReceiveBytes: " + WSReceiveBytes, Width, (Off++) * FontSize);
 	Context.fillText("WSReadyState: " + WSReadyState, Width, (Off++) * FontSize);
 
+	DrawGraph(Context, 100, 100, 300, 100);
+
 
 	if(0 == (xx % 120))
 	{
@@ -100,6 +135,8 @@ function Draw()
 			WS.send(msg);
 		}
 	}
+
+
 
 	xx++;
 	RequestDraw();
@@ -207,10 +244,27 @@ function WSError(event)
 }
 function WSMessage(event)
 {
-	console.log("message ");
 	WSMessageCount += 1;
-	AddMessage('Message' + WSMessageCount + ": '" + event.data + "'");
-	console.log(event.data);
+	let mesg = event.data;
+	console.log("message " + mesg);
+	if(mesg[0] == '{')
+	{
+		console.log("trying to parse :" + mesg);
+		let obj = JSON.parse(mesg);
+		if(obj.t0)
+		{
+			Graph.unshift(obj.t0);
+			if(Graph.length > MaxGraph)
+			{
+				Graph.pop();
+			}
+		}
+	}
+	else
+	{
+		AddMessage('Message[' + WSMessageCount + "]: '" + event.data + "'");
+		console.log(event.data);
+	}
 }
 
 

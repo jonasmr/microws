@@ -416,19 +416,6 @@ static const char* WSAGetErrorString(int Error)
 		return "WSASYSCALLFAILURE";
 	case WSASERVICE_NOT_FOUND:
 		return "WSASERVICE_NOT_FOUND";
-
-	// case WSA_INVALID_HANDLE:
-	// 	return "WSA_INVALID_HANDLE";
-	// case WSA_NOT_ENOUGH_MEMORY:
-	// 	return "WSA_NOT_ENOUGH_MEMORY";
-	// case WSA_INVALID_PARAMETER:
-	// 	return "WSA_INVALID_PARAMETER";
-	// case WSA_OPERATION_ABORTED:
-	// 	return "WSA_OPERATION_ABORTED";
-	// case WSA_IO_INCOMPLETE:
-	// 	return "WSA_IO_INCOMPLETE";
-	// case WSA_IO_PENDING:
-	// 	return "WSA_IO_PENDING";
 	case WSA_E_NO_MORE:
 		return "WSA_E_NO_MORE";
 	case WSA_E_CANCELLED:
@@ -533,7 +520,7 @@ static void MicroWSCheckError(uint32_t i, int Error)
 		case WSAENETRESET:
 		case WSAECONNABORTED:
 		case WSAECONNRESET:
-			uprintf("CLOSE CONNECTION %d :: %d :: SOCK[%d]\n", i, C.Opening, C.Socket);
+			uprintf("CLOSE CONNECTION %d :: %d :: SOCK[%d] %s\n", i, C.Opening, C.Socket, WSAGetErrorString(err1));
 			shutdown(C.Socket, 2);
 			closesocket(C.Socket);
 			C.Socket = INVALID_SOCKET;
@@ -569,7 +556,7 @@ static uint32_t MicroWSDrain()
 					Put		  = MicroWSPutAdvance(Put, Get, (uint32_t)Bytes);
 					C.RecvPut = Put;
 				}
-				else
+				else if(Bytes < 0)
 				{
 					MicroWSCheckError(i, Bytes);
 				}
@@ -598,7 +585,7 @@ static uint32_t MicroWSDrain()
 					Get		  = MicroWSGetAdvance(Get, Put, (uint32_t)Bytes);
 					C.SendGet = Get;
 				}
-				else
+				else if(Bytes < 0)
 				{
 					MicroWSCheckError(i, Bytes);
 				}
@@ -630,81 +617,6 @@ static uint32_t MicroWSSendRaw(uint32_t ConnectionId, uint8_t* Data, uint32_t Si
 	return FailCount;
 }
 
-// static bool MicroWSTryAccept(uint32_t ConnectionId)
-// {
-// 	MicroWSConnection& C	  = S.Connections[ConnectionId % MICROWS_MAX_CONNECTIONS];
-// 	MWSSocket		   Socket = C.Socket;
-// 	MWS_ASSERT(C.Opening == ConnectionId);
-// 	char Req[8192];
-// 	// todo: do this into the ring buffer properly..
-// 	int nReceived = recv(Socket, Req, sizeof(Req) - 1, 0);
-// 	if(nReceived > 0)
-// 	{
-// 		Req[nReceived] = '\0';
-// 		uprintf("req received\n%s", Req);
-// #if MICROPROFILE_MINIZ
-// 		// Expires: Tue, 01 Jan 2199 16:00:00 GMT\r\n
-// #define MICROPROFILE_HTML_HEADER "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: deflate\r\n\r\n"
-// #else
-// #define MICROPROFILE_HTML_HEADER "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n"
-// #endif
-// 		char* pHttp = strstr(Req, "HTTP/");
-
-// 		char* pGet			= strstr(Req, "GET /");
-// 		char* pHost			= strstr(Req, "Host: ");
-// 		char* pWebSocketKey = strstr(Req, "Sec-WebSocket-Key: ");
-// 		auto  Terminate		= [](char* pString)
-// 		{
-// 			char* pEnd = pString;
-// 			while(*pEnd != '\0')
-// 			{
-// 				if(*pEnd == '\r' || *pEnd == '\n' || *pEnd == ' ')
-// 				{
-// 					*pEnd = '\0';
-// 					return;
-// 				}
-// 				pEnd++;
-// 			}
-// 		};
-
-// 		if(pWebSocketKey)
-// 		{
-// 			pWebSocketKey += sizeof("Sec-WebSocket-Key: ") - 1;
-// 			Terminate(pWebSocketKey);
-
-// 			const char* pGUID	   = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-// 			const char* pHandShake = "HTTP/1.1 101 Switching Protocols\r\n"
-// 									 "Upgrade: websocket\r\n"
-// 									 "Connection: Upgrade\r\n"
-// 									 "Sec-WebSocket-Accept: ";
-
-// 			char EncodeBuffer[512];
-// 			int	 nLen = stbsp_snprintf(EncodeBuffer, sizeof(EncodeBuffer) - 1, "%s%s", pWebSocketKey, pGUID);
-// 			uprintf("encode buffer is '%s' %d, %d\n", EncodeBuffer, nLen, (int)strlen(EncodeBuffer));
-
-// 			uint8_t			 sha[20];
-// 			MicroWS_SHA1_CTX ctx;
-// 			MicroWS_SHA1_Init(&ctx);
-// 			MicroWS_SHA1_Update(&ctx, (unsigned char*)EncodeBuffer, nLen);
-// 			MicroWS_SHA1_Final((unsigned char*)&sha[0], &ctx);
-// 			char HashOut[(2 + sizeof(sha) / 3) * 4];
-// 			memset(&HashOut[0], 0, sizeof(HashOut));
-// 			MicroWSBase64Encode(&HashOut[0], &sha[0], sizeof(sha));
-
-// 			char Reply[1024];
-// 			nLen = stbsp_snprintf(Reply, sizeof(Reply) - 1, "%s%s\r\n\r\n", pHandShake, HashOut);
-// 			MWS_ASSERT(nLen < 1024 && nLen >= 0);
-// 			MicroWSSendRaw(ConnectionId, (uint8_t*)&Reply[0], nLen, MICROWS_FLAG_FLUSH);
-// 			return true;
-// 		}
-// 	}
-// #ifdef _WIN32
-// 	closesocket(Socket);
-// #else
-// 	close(Socket);
-// #endif
-// 	return false;
-// }
 #ifdef _WIN32
 static void* MicroWSAllocRing()
 {
@@ -792,8 +704,7 @@ Exit:
 	return RingBuffer;
 }
 #endif
-
-static uint32_t MicroWSAssignConnection(MWSSocket Socket)
+static uint32_t MicroWSFindConnection()
 {
 	uint32_t ConnectionId = MICROWS_INVALID_CONNECTION;
 	uint32_t Last		  = S.LastConnection;
@@ -806,30 +717,41 @@ static uint32_t MicroWSAssignConnection(MWSSocket Socket)
 		MicroWSConnection& C	 = S.Connections[index];
 		if(C.Opening == C.Closed)
 		{
-			if(!C.SendBuffer)
-				C.SendBuffer = (uint8_t*)MicroWSAllocRing();
-			if(!C.RecvBuffer)
-				C.RecvBuffer = (uint8_t*)MicroWSAllocRing();
-
-			C.Opening		 = id;
-			C.Socket		 = Socket;
+			MWS_ASSERT(C.Opening != id);
+			S.LastConnection = id;
 			ConnectionId	 = id;
-			S.LastConnection = id + 1;
-			S.ConnectionVersion++;
-
-			C.SendBlocked = 0;
-			C.SendPut	  = 0;
-			C.SendGet	  = 0;
-			C.RecvPut	  = 0;
-			C.RecvGet	  = 0;
-			C.Fail88	  = 0;
-			C.FailRSV	  = 0;
-
-			uprintf("ASSIGN :: %d -> %d SOCK[%d]\n", index, id, C.Socket);
 			break;
 		}
 	}
 	return ConnectionId;
+}
+
+static void MicroWSAssignConnection(uint32_t Id, MWSSocket Socket)
+{
+
+	uint32_t Index = Id % MICROWS_MAX_CONNECTIONS;
+
+	MicroWSConnection& C = S.Connections[Index];
+	MWS_ASSERT(C.Opening == C.Closed);
+	if(!C.SendBuffer)
+		C.SendBuffer = (uint8_t*)MicroWSAllocRing();
+	if(!C.RecvBuffer)
+		C.RecvBuffer = (uint8_t*)MicroWSAllocRing();
+
+	C.Opening = Id;
+	C.Socket  = Socket;
+
+	S.ConnectionVersion++;
+
+	C.SendBlocked = 0;
+	C.SendPut	  = 0;
+	C.SendGet	  = 0;
+	C.RecvPut	  = 0;
+	C.RecvGet	  = 0;
+	C.Fail88	  = 0;
+	C.FailRSV	  = 0;
+
+	uprintf("ASSIGN :: %d -> %d SOCK[%d]\n", Index, Id, C.Socket);
 }
 
 void MicroWSGetState(MicroWSConnectionState& State)
@@ -856,16 +778,15 @@ void MicroWSUpdate(uint32_t* ConnectionsVersion, uint32_t* MaxMessageData)
 {
 	for(int i = 0; i < MAX_CONNECTIONS_PER_UPDATE; ++i)
 	{
+		uint32_t NewConnection = MicroWSFindConnection();
+		if(NewConnection == MICROWS_INVALID_CONNECTION)
+			break; // don't accept if we dont have a slot to accept the connection
 		MWSSocket Socket = accept(S.ListenerSocket, 0, 0);
 		if(MWS_INVALID_SOCKET(Socket))
 		{
 			break;
 		}
-		if(MicroWSAssignConnection(Socket) == MICROWS_INVALID_CONNECTION)
-		{
-			S.RejectCount++;
-			uprintf("Rejected connection. No Available connection slots\n");
-		}
+		MicroWSAssignConnection(NewConnection, Socket);
 	}
 	uint32_t MaxData = MicroWSDrain();
 	if(MaxMessageData)
@@ -875,7 +796,7 @@ void MicroWSUpdate(uint32_t* ConnectionsVersion, uint32_t* MaxMessageData)
 }
 
 #define WEBSOCKET_HEADER_MAX 18
-struct MicroProfileWebSocketHeader0
+struct MicroWSWebSocketHeader0
 {
 	union
 	{
@@ -891,7 +812,7 @@ struct MicroProfileWebSocketHeader0
 	};
 };
 
-struct MicroProfileWebSocketHeader1
+struct MicroWSWebSocketHeader1
 {
 	union
 	{
@@ -926,8 +847,8 @@ uint32_t MicroWSTryRead(void* Src, uint32_t Size, uint32_t& OutOffset, uint32_t 
 	// uint64_t nSize;
 	// uint64_t nSizeBytes = 0;
 
-	MicroProfileWebSocketHeader0* h0 = (MicroProfileWebSocketHeader0*)(Data++);
-	MicroProfileWebSocketHeader1* h1 = (MicroProfileWebSocketHeader1*)(Data++);
+	MicroWSWebSocketHeader0* h0 = (MicroWSWebSocketHeader0*)(Data++);
+	MicroWSWebSocketHeader1* h1 = (MicroWSWebSocketHeader1*)(Data++);
 	if(h0->v == 0x88)
 	{
 		C.Fail88++;
@@ -1002,8 +923,8 @@ uint32_t MicroWSTryRead(void* Src, uint32_t Size, uint32_t& OutOffset, uint32_t 
 
 uint32_t MicroWSWrite(uint8_t* Dst, const void* Src, uint32_t Size)
 {
-	MicroProfileWebSocketHeader0 h0;
-	MicroProfileWebSocketHeader1 h1;
+	MicroWSWebSocketHeader0 h0;
+	MicroWSWebSocketHeader1 h1;
 	h0.v					 = 0;
 	h1.v					 = 0;
 	h0.opcode				 = 1;
@@ -1237,6 +1158,7 @@ void MicroWSWebSocketFrame()
 
 					if(Disconnect)
 					{
+						MWS_BREAK();
 						uprintf("removing socket %" PRId64 "\n", (uint64_t)Socket);
 #ifndef _WIN32
 						shutdown(C.Socket, SHUT_WR);

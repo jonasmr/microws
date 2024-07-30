@@ -1,6 +1,7 @@
 #include "microws.h"
 #include <windows.h>
 
+#include <math.h>
 #include <stdio.h>
 
 int main()
@@ -9,6 +10,7 @@ int main()
 	int					   Delay   = 0;
 	uint32_t			   Version = (uint32_t)-1;
 	MicroWSConnectionState State;
+	uint32_t			   Time = 0;
 	while(true)
 	{
 		uint32_t MaxData;
@@ -37,6 +39,15 @@ int main()
 				int len = snprintf(buffer, sizeof(buffer) - 1, "Send %d -> %d", Ind, State.Connections[Index - 1]);
 				MicroWSSendMessage(State.Connections[Index - 1], buffer, len);
 			}
+		}
+
+		{
+			char  buffer[2048];
+			float fTime = Time / 30.f;
+			float t0	= (float)(sin(fTime) + sin(fTime * 10.0) * 0.1);
+			int	  len	= snprintf(buffer, sizeof(buffer) - 1, "{\"t0\":\"%f\"}", t0);
+			MicroWSSendMessage(MICROWS_ALL_CONNECTIONS, buffer, len);
+			Time++;
 		}
 
 		uint8_t	 Buffer[1024 + 1];
