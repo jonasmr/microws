@@ -1,10 +1,5 @@
 #include "microws.h"
 
-//
-// todo:
-//		handle disconnect.
-//
-
 #define MWS_ASSERT(a)                                                                                                                                                                                  \
 	do                                                                                                                                                                                                 \
 	{                                                                                                                                                                                                  \
@@ -54,25 +49,24 @@ typedef pthread_t MicroWSThread;
 #define MICROWS_DEBUG 1
 #endif
 
-#if MICROWS_DEBUG
-#ifdef _WIN32
-void uprintf(const char* fmt, ...)
-{
-	va_list args;
-	va_start(args, fmt);
-	char buffer[1024];
-	stbsp_vsnprintf(buffer, sizeof(buffer) - 1, fmt, args);
-	OutputDebugStringA(buffer);
-	printf(buffer);
-	va_end(args);
-}
-#else
-#define uprintf(...) printf(__VA_ARGS__)
+#ifndef MICROWS_LOG
+#define MICROWS_LOG 1
 #endif
+
+void mws_log_impl(int error, uint32_t ConnectionId, const char* fmt, ...);
+
+#if MICROWS_LOG || MICROWS_DEBUG
+#define mws_log(id, ...) mws_log_impl(0, id, __VA_ARGS__)
+#define mws_error(id, ...) mws_log_impl(1, id, __VA_ARGS__)
 #else
-#define uprintf(...)                                                                                                                                                                                   \
+#define mws_log(id, ...)                                                                                                                                                                               \
 	do                                                                                                                                                                                                 \
 	{                                                                                                                                                                                                  \
+	} while(0)
+#define mws_error(id, ...)                                                                                                                                                                             \
+	do                                                                                                                                                                                                 \
+	{                                                                                                                                                                                                  \
+		MWS_BREAK();                                                                                                                                                                                   \
 	} while(0)
 #endif
 
@@ -88,8 +82,6 @@ static void		MicroWSThreadJoin(MicroWSThread* pThread);
 static uint32_t MicroWSSendRaw(uint32_t ConnectionId, uint8_t* Data, uint32_t Size);
 static bool		MicroWSOpening(uint32_t i);
 static bool		MicroWSOpen(uint32_t i);
-static bool		MicroWSWrite(uint32_t i);
-static bool		MicroWSRead(uint32_t i);
 static bool		MicroWSWebServerStart();
 static void*	MicroWSAllocRing();
 static void		MicroWS_SHA1_Transform(uint32_t[5], const unsigned char[64]);
@@ -208,8 +200,8 @@ static bool MicroWSTryAccept(uint32_t Index)
 	uint32_t Bytes = MicroWSGetSpace(Get, Put);
 	if(Bytes > 0)
 	{
-		uprintf("trying to accept %d -> %d bytes CONN %d ->SOCK[%d]\n", Index, Bytes, C.Opening, C.Socket);
-		// check its null terminated
+		mws_log(C.Opening, "->TRY_ACCEPT\n");
+		//  check its null terminated
 		int Terminated = -1;
 		{
 			// search for "\r\n\r\n" terminator
@@ -224,10 +216,8 @@ static bool MicroWSTryAccept(uint32_t Index)
 		}
 		if(Terminated == -1)
 		{
-			uprintf("not null, and not Terminated!!\n");
 			return false;
 		}
-		uprintf("trying to accept!!\n");
 		const uint8_t Term = Data[Terminated];
 		Data[Terminated]   = '\0';
 		char* Req		   = (char*)Data;
@@ -269,7 +259,6 @@ static bool MicroWSTryAccept(uint32_t Index)
 
 			char EncodeBuffer[512];
 			int	 nLen = stbsp_snprintf(EncodeBuffer, sizeof(EncodeBuffer) - 1, "%s%s", pWebSocketKey, pGUID);
-			uprintf("encode buffer is '%s' %d, %d\n", EncodeBuffer, nLen, (int)strlen(EncodeBuffer));
 
 			uint8_t			 sha[20];
 			MicroWS_SHA1_CTX ctx;
@@ -289,17 +278,14 @@ static bool MicroWSTryAccept(uint32_t Index)
 
 			C.RecvGet = MicroWSGetAdvance(Get, Put, Terminated + 1);
 			C.Open	  = C.Opening;
-
-			uprintf("OPEN! %d CONN %d SOCK[%d]\n", Index, C.Opening, C.Socket);
+			mws_log(C.Open, "-> OPEN\n");
 
 			S.ConnectionVersion++;
 			return true;
 		}
 		else
 		{
-			// No web socket key. we can't handshake, but we will ignore the message.
-			uprintf("ignoring message %s\n", Req);
-			MWS_BREAK();
+			mws_log(C.Opening, "No web socket key\n");
 		}
 	}
 	return false;
@@ -480,10 +466,9 @@ static const char* WSAGetErrorString(int Error)
 
 static void MicroWSCheckErrorSelect(int Error)
 {
-	if(Error == EAGAIN)
-		MWS_BREAK();
-	if(Error == EWOULDBLOCK)
-		MWS_BREAK();
+	MWS_ASSERT(Error != EAGAIN);
+	MWS_ASSERT(Error != EWOULDBLOCK);
+
 	if(Error == SOCKET_ERROR)
 	{
 		int err1 = WSAGetLastError();
@@ -494,25 +479,29 @@ static void MicroWSCheckErrorSelect(int Error)
 		case WSAEWOULDBLOCK:
 			return;
 		default:
-			uprintf("last error unknown %d .. %s\n", err1, WSAGetErrorString(err1));
-			MWS_BREAK();
+			mws_error(MICROWS_INVALID_CONNECTION, "Unknown WSA Error: %d:%s\n", err1, WSAGetErrorString(err1));
 		}
 	}
+}
+static void MicroWSClose(uint32_t i)
+{
+	MicroWSConnection& C = S.Connections[i];
+	shutdown(C.Socket, 2);
+	closesocket(C.Socket);
+	C.Socket = INVALID_SOCKET;
+	C.Open = C.Closed = C.Opening;
+	S.ConnectionVersion++;
 }
 
 static void MicroWSCheckError(uint32_t i, int Error)
 {
-	MicroWSConnection& C = S.Connections[i];
-	if(Error == EAGAIN)
-		MWS_BREAK();
-	if(Error == EWOULDBLOCK)
-		MWS_BREAK();
+	MWS_ASSERT(Error != EAGAIN);
+	MWS_ASSERT(Error != EWOULDBLOCK);
+
 	if(Error == SOCKET_ERROR)
 	{
-
-		int err1 = WSAGetLastError();
-		if(err1 == WSAEWOULDBLOCK)
-			return;
+		MicroWSConnection& C	= S.Connections[i];
+		int				   err1 = WSAGetLastError();
 		switch(err1)
 		{
 		case WSAEWOULDBLOCK:
@@ -520,17 +509,11 @@ static void MicroWSCheckError(uint32_t i, int Error)
 		case WSAENETRESET:
 		case WSAECONNABORTED:
 		case WSAECONNRESET:
-			uprintf("CLOSE CONNECTION %d :: %d :: SOCK[%d] %s\n", i, C.Opening, C.Socket, WSAGetErrorString(err1));
-			shutdown(C.Socket, 2);
-			closesocket(C.Socket);
-			C.Socket = INVALID_SOCKET;
-			C.Open = C.Closed = C.Opening;
-			S.ConnectionVersion++;
+			mws_log(C.Opening, "->CLOSE (WSAError %d:%s)\n", err1, WSAGetErrorString(err1));
+			MicroWSClose(i);
 			break;
-
 		default:
-			uprintf("last error unknown %d .. %s SOCK[%d]\n", err1, WSAGetErrorString(err1), C.Socket);
-			MWS_BREAK();
+			mws_error(MICROWS_INVALID_CONNECTION, "Unknown WSA Error: %d:%s\n", err1, WSAGetErrorString(err1));
 		}
 	}
 }
@@ -640,33 +623,33 @@ static void* MicroWSAllocRing()
 
 	if(!Placeholder1)
 	{
-		uprintf("VirtualAlloc2 failed, error %#x\n", GetLastError());
+		mws_log(MICROWS_INVALID_CONNECTION, "VirtualAlloc2 failed, error %#x\n", GetLastError());
 		goto Exit;
 	}
 	if(FALSE == VirtualFree(Placeholder1, BufferSize, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
 	{
-		uprintf("VirtualFreeEx failed, error %#x\n", GetLastError());
+		mws_log(MICROWS_INVALID_CONNECTION, "VirtualFreeEx failed, error %#x\n", GetLastError());
 		goto Exit;
 	}
 	Placeholder2 = (void*)((ULONG_PTR)Placeholder1 + BufferSize);
 	Section		 = CreateFileMapping(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, BufferSize, nullptr);
 	if(!Section)
 	{
-		uprintf("CreateFileMapping failed, error %#x\n", GetLastError());
+		mws_log(MICROWS_INVALID_CONNECTION, "CreateFileMapping failed, error %#x\n", GetLastError());
 		goto Exit;
 	}
 
 	View1 = MapViewOfFile3(Section, nullptr, Placeholder1, 0, BufferSize, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0);
 	if(!View1)
 	{
-		uprintf("MapViewOfFile3 failed, error %#x\n", GetLastError());
+		mws_log(MICROWS_INVALID_CONNECTION, "MapViewOfFile3 failed, error %#x\n", GetLastError());
 		goto Exit;
 	}
 	Placeholder1 = nullptr;
 	View2		 = MapViewOfFile3(Section, nullptr, Placeholder2, 0, BufferSize, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0);
 	if(!View2)
 	{
-		uprintf("MapViewOfFile3 failed, error %#x\n", GetLastError());
+		mws_log(MICROWS_INVALID_CONNECTION, "MapViewOfFile3 failed, error %#x\n", GetLastError());
 		goto Exit;
 	}
 	Placeholder2 = nullptr;
@@ -750,8 +733,7 @@ static void MicroWSAssignConnection(uint32_t Id, MWSSocket Socket)
 	C.RecvGet	  = 0;
 	C.Fail88	  = 0;
 	C.FailRSV	  = 0;
-
-	uprintf("ASSIGN :: %d -> %d SOCK[%d]\n", Index, Id, C.Socket);
+	mws_log(Id, "->ASSIGN\n");
 }
 
 void MicroWSGetState(MicroWSConnectionState& State)
@@ -842,10 +824,6 @@ uint32_t MicroWSTryRead(void* Src, uint32_t Size, uint32_t& OutOffset, uint32_t 
 	uint8_t* Data	   = (uint8_t*)Src;
 	uint8_t* DataStart = Data;
 	uint8_t* DataEnd   = Data + Size;
-	// uint8_t	 Mask[4];
-	// int		 r;
-	// uint64_t nSize;
-	// uint64_t nSizeBytes = 0;
 
 	MicroWSWebSocketHeader0* h0 = (MicroWSWebSocketHeader0*)(Data++);
 	MicroWSWebSocketHeader1* h1 = (MicroWSWebSocketHeader1*)(Data++);
@@ -977,7 +955,6 @@ uint32_t MicroWSWrite(uint8_t* Dst, const void* Src, uint32_t Size)
 
 uint32_t MicroWSGetMessage(uint32_t Connection, uint8_t* OutBuffer, uint32_t BufferSize, uint32_t* ConnectionOut)
 {
-	// MicroWSConnection& C			 = S.Connections[Connection];
 	uint32_t start		   = 0;
 	uint32_t end		   = MICROWS_MAX_CONNECTIONS;
 	bool	 AnyConnection = Connection != MICROWS_ANY_CONNECTION;
@@ -1003,18 +980,9 @@ uint32_t MicroWSGetMessage(uint32_t Connection, uint8_t* OutBuffer, uint32_t Buf
 				uint8_t* Data		   = C.RecvBuffer + Get;
 				uint32_t MessageOffset = 0;
 				uint32_t MessageSize   = MicroWSTryRead(Data, Bytes, MessageOffset, i);
-				if(MessageSize)
+				if(MessageSize && MessageSize <= BufferSize)
 				{
-					if(MessageSize > BufferSize)
-					{
-						MWS_BREAK(); // todo: support this.
-					}
-					else
-					{
-						memcpy(OutBuffer, Data + MessageOffset, MessageSize);
-					}
-					uint32_t OutBytes = Bytes < BufferSize ? Bytes : BufferSize;
-
+					memcpy(OutBuffer, Data + MessageOffset, MessageSize);
 					C.RecvGet = MicroWSGetAdvance(Get, Put, MessageOffset + MessageSize);
 					return MessageSize;
 				}
@@ -1092,98 +1060,6 @@ static bool MicroWSWrite(uint32_t i)
 static bool MicroWSRead(uint32_t i)
 {
 	return true;
-}
-
-void MicroWSWebSocketFrame()
-{
-	fd_set Read, Write, Error;
-	FD_ZERO(&Read);
-	FD_ZERO(&Write);
-	FD_ZERO(&Error);
-	MWSSocket LastSocket	 = 1;
-	uint32_t  NumOpenSockets = 0;
-	for(uint32_t i = 0; i < MICROWS_MAX_CONNECTIONS; ++i)
-	{
-		if(MicroWSOpening(i) || MicroWSOpen(i))
-		{
-			MicroWSConnection& C = S.Connections[i];
-			LastSocket			 = MicroWSMax(LastSocket, C.Socket + 1);
-			FD_SET(C.Socket, &Read);
-			FD_SET(C.Socket, &Write);
-			FD_SET(C.Socket, &Error);
-			NumOpenSockets++;
-		}
-	}
-	if(NumOpenSockets)
-	{
-		timeval tv;
-		tv.tv_sec  = 0;
-		tv.tv_usec = 0;
-		int r	   = select((int)LastSocket, &Read, &Write, &Error, &tv);
-		if(r < 0)
-		{
-			MicroWSCheckErrorSelect(r);
-		}
-		if(-1 == r)
-		{
-			MWS_ASSERT(0);
-		}
-		else
-		{
-			for(uint32_t i = 0; i < MICROWS_MAX_CONNECTIONS; ++i)
-			{
-				if(MicroWSOpening(i) || MicroWSOpen(i))
-				{
-					MicroWSConnection& C		  = S.Connections[i];
-					MWSSocket		   Socket	  = C.Socket;
-					bool			   Disconnect = false;
-					if(FD_ISSET(Socket, &Error))
-					{
-						Disconnect = true;
-					}
-					if(!Disconnect && FD_ISSET(Socket, &Read))
-					{
-						if(!MicroWSRead(i))
-						{
-							Disconnect = true;
-						}
-					}
-					if(!Disconnect && FD_ISSET(Socket, &Write))
-					{
-						if(!MicroWSWrite(i))
-						{
-							Disconnect = true;
-						}
-					}
-
-					if(Disconnect)
-					{
-						MWS_BREAK();
-						uprintf("removing socket %" PRId64 "\n", (uint64_t)Socket);
-#ifndef _WIN32
-						shutdown(C.Socket, SHUT_WR);
-#else
-						shutdown(C.Socket, 1);
-#endif
-						char tmp[128];
-						int	 r = 1;
-						while(r > 0)
-						{
-							r = recv(C.Socket, tmp, sizeof(tmp), 0);
-						}
-#ifdef _WIN32
-						closesocket(C.Socket);
-#else
-						close(C.Socket);
-#endif
-						C.Socket = INVALID_SOCKET;
-						C.Closed = C.Opening;
-						C.Open	 = C.Opening;
-					}
-				}
-			}
-		}
-	}
 }
 
 #ifndef MicroWSSetNonBlocking // fcntl doesnt work on a some unix like platforms..
@@ -1270,7 +1146,7 @@ bool MicroWSWebServerStart()
 			break;
 		}
 	}
-	listen(S.ListenerSocket, 8);
+	listen(S.ListenerSocket, MICROWS_MAX_CONNECTIONS);
 	return true;
 }
 
@@ -1603,4 +1479,32 @@ template <typename T>
 static T MicroWSClamp(T a, T min_, T max_)
 {
 	return MicroWSMin(max_, MicroWSMax(min_, a));
+}
+
+void mws_log_impl(int error, uint32_t ConnectionId, const char* fmt, ...)
+{
+#if MICROWS_LOG || MICROWS_DEBUG
+	if(MICROWS_LOG || error)
+	{
+		static const size_t BUF_SIZE = 1024;
+		char				Buffer[BUF_SIZE];
+		uint32_t			Index  = -1;
+		MWSSocket			Socket = INVALID_SOCKET;
+		if(ConnectionId < MICROWS_ALL_CONNECTIONS)
+		{
+			Index  = ConnectionId % MICROWS_MAX_CONNECTIONS;
+			Socket = S.Connections[Index].Socket;
+		}
+
+		int		l = stbsp_snprintf(Buffer, sizeof(Buffer) - 1, "MicroWS:%5x(%02x)[Sock:%d] ", ConnectionId, Index, Socket);
+		char*	p = &Buffer[0] + l;
+		va_list args;
+		va_start(args, fmt);
+		stbsp_vsnprintf(p, BUF_SIZE - l - 1, fmt, args);
+		OutputDebugStringA(Buffer);
+		printf(Buffer);
+		va_end(args);
+	}
+	MWS_ASSERT(!error);
+#endif
 }
