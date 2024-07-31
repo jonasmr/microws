@@ -1,5 +1,10 @@
 #include "microws.h"
+
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <math.h>
 #include <stdio.h>
@@ -55,13 +60,14 @@ int main()
 		Read		  = MicroWSGetMessage((uint32_t)-1, Buffer, 1024);
 		if(Read > 0)
 		{
-			if(Read > 1024)
-				__debugbreak();
 			Buffer[Read] = '\0';
 			printf("RECV: %s\n", Buffer);
 		}
-
+#ifdef _WIN32
 		Sleep(30);
+#else
+		usleep(30 * 1000);
+#endif
 	}
 	MicroWSShutdown();
 }
