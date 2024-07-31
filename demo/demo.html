@@ -177,7 +177,7 @@ function Connect()
 	WSSeconds = 0;
 	if(WSOpenTime)
 		WSSeconds = new Date() - WSOpenTime;
-	let DidTimeout = WSSeconds > 2000;
+	let DidTimeout = WSSeconds > 5000;
 
 	if(WS && (WS.readyState == 1 || WS.readyState == 0))
 	{

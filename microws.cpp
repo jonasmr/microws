@@ -766,6 +766,11 @@ void MicroWSUpdate(uint32_t* ConnectionsVersion, uint32_t* MaxMessageData)
 		MWSSocket Socket = accept(S.ListenerSocket, 0, 0);
 		if(MWS_INVALID_SOCKET(Socket))
 		{
+			int err1 = WSAGetLastError();
+			if(err1 != WSAEWOULDBLOCK)
+			{
+				mws_log(MICROWS_INVALID_CONNECTION, "No Connection WSA Error: %d:%s\n", err1, WSAGetErrorString(err1));
+			}
 			break;
 		}
 		MicroWSAssignConnection(NewConnection, Socket);
@@ -1052,16 +1057,6 @@ bool MicroWSOpen(uint32_t i)
 	return int32_t(Open - Closed) > 0;
 }
 
-static bool MicroWSWrite(uint32_t i)
-{
-	return true;
-}
-
-static bool MicroWSRead(uint32_t i)
-{
-	return true;
-}
-
 #ifndef MicroWSSetNonBlocking // fcntl doesnt work on a some unix like platforms..
 void MicroWSSetNonBlocking(MWSSocket Socket, int NonBlocking)
 {
@@ -1150,19 +1145,8 @@ bool MicroWSWebServerStart()
 	return true;
 }
 
-void MicroWSWebServerJoin()
-{
-	// if(S.WebSocketThreadRunning)
-	// {
-	// 	MicroWSThreadJoin(&S.WebSocketSendThread);
-	// }
-	// S.WebSocketThreadJoined = 1;
-}
-
 void MicroWSWebServerStop()
 {
-	// MicroWSWebServerJoin();
-	// MWS_ASSERT(S.WebSocketThreadJoined);
 #ifdef _WIN32
 	closesocket(S.ListenerSocket);
 	WSACleanup();
@@ -1170,49 +1154,6 @@ void MicroWSWebServerStop()
 	close(S.ListenerSocket);
 #endif
 }
-
-#ifndef _WIN32
-void MicroWShreadStart(MicroWSThread* pThread, MicroWSThreadFunc Func)
-{
-	pthread_attr_t Attr;
-	int			   r = pthread_attr_init(&Attr);
-	MWS_ASSERT(r == 0);
-	pthread_create(pThread, &Attr, Func, 0);
-}
-void MicroWSThreadJoin(MicroWSThread* pThread)
-{
-	int r = pthread_join(*pThread, 0);
-	MWS_ASSERT(r == 0);
-}
-#elif defined(_WIN32)
-DWORD __stdcall ThreadTrampoline(void* pFunc)
-{
-	MicroWSThreadFunc F = (MicroWSThreadFunc)pFunc;
-	return (uint32_t)(uintptr_t)F(0);
-}
-void MicroWShreadStart(MicroWSThread* pThread, MicroWSThreadFunc Func)
-{
-	*pThread = CreateThread(0, 0, ThreadTrampoline, Func, 0, 0);
-}
-void MicroWSThreadJoin(MicroWSThread* pThread)
-{
-	WaitForSingleObject(*pThread, INFINITE);
-	CloseHandle(*pThread);
-}
-#else
-void MicroWShreadStart(MicroWSThread* pThread, MicroWSThreadFunc Func)
-{
-	*pThread = MP_ALLOC_OBJECT(std::thread);
-	new(*pThread) std::thread(Func, nullptr);
-}
-void MicroWSThreadJoin(MicroWSThread* pThread)
-{
-	(*pThread)->join();
-	(*pThread)->~thread();
-	MP_FREE(*pThread);
-	*pThread = 0;
-}
-#endif
 
 // begin: SHA-1 in C
 // ftp://ftp.funet.fi/pub/crypt/hash/sha/sha1.c
