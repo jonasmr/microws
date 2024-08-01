@@ -3,4 +3,4 @@
 	url = https://github.com/jonasmr/ngen.git
 [submodule "stb"]
 	path = stb
-	url = git@github.com:nothings/stb.git
+	url = https://github.com/nothings/stb.git
