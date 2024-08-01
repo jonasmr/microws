@@ -721,10 +721,44 @@ Exit:
 	return RingBuffer;
 }
 #else
+static int MicroWSGetAnonFile()
+{
+#ifdef __APPLE__
+	// tweaked verison of https://github.com/lassik/shm_open_anon/blob/master/shm_open_anon.c
+	int64_t PID = (int64_t)getpid();
+	static int Count = 1;
+	char Buffer[128];
+
+	for(int i = 0; i < 3; ++i)
+	{
+		snprintf(Buffer, sizeof(Buffer)-1, "/shm-micro-ws-%" PRId64 "-%d", PID, Count);
+		Count++;
+		int fd = shm_open(Buffer, O_RDWR | O_CREAT | O_EXCL, 0600);
+		if(fd != -1)
+		{
+			int save;
+			if(shm_unlink(Buffer) == -1)
+			{
+				save = errno;
+				close(fd);
+				errno = save;
+				return -1;
+			}
+			return fd;
+		}
+		if(errno != EEXIST)
+			break;
+	}
+	return -1;
+
+
+#else
+	return memfd_create("microws_ring", 0);
+#endif
+}
 static void* MicroWSAllocRing()
 {
-	char path[] = "/dev/shm/ring-buffer-XXXXXX";
-	int fd = memfd_create("microws_ring", 0);
+	int fd = MicroWSGetAnonFile();
 	if (fd == -1)
 		return nullptr;
 	ftruncate(fd, MICROWS_BUFFER_SPACE);
@@ -733,8 +767,6 @@ static void* MicroWSAllocRing()
 		return nullptr;
 	void* p0 = mmap(Buffer, MICROWS_BUFFER_SPACE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
 	void* p1 = mmap((char*)Buffer + MICROWS_BUFFER_SPACE, MICROWS_BUFFER_SPACE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
-	memcpy(p0, "hej", 4);
-	printf("yo map %p %p .. %s\n", p0, p1, p1);
 	return Buffer;
 }
 #endif
